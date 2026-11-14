@@ -60,6 +60,8 @@ object AutoPilot {
         }
     }
 
+    private var lastPower: Double? = null
+
     /** One decision every 50 ms, as the unit tests' angler. */
     private fun angle() {
         val t = Game.trip ?: return
@@ -77,11 +79,16 @@ object AutoPilot {
             Trip.State.READY, Trip.State.LANDED -> {
                 while (t.bait != want.likes.first()) Game.cycleBait()
                 Game.aimYaw = if (want.rocks && l.rocksAt.isNotEmpty()) l.rocksAt[0].first else 0.0
+                lastPower = null
                 Game.press()
             }
             Trip.State.POWER -> {
                 val goal = if (want.rocks && l.rocksAt.isNotEmpty()) l.rocksAt[0].second else if (want.far) 13.0 else 6.0
-                if (abs(t.power - (goal - 3.0) / 13.0) < 0.04) Game.press()
+                // Pressed as the meter passes the goal: on a slow device a frame can jump right over the window.
+                val target = (goal - 3.0) / 13.0
+                val prev = lastPower
+                lastPower = t.power
+                if (abs(t.power - target) < 0.04 || (prev != null && (prev - target) * (t.power - target) <= 0)) { lastPower = null; Game.press() }
             }
             Trip.State.BITE -> Game.press()
             Trip.State.FIGHT -> if (t.running <= 0 && t.tension < 0.7) Game.reel(2.4 * 0.05)

@@ -42,6 +42,7 @@ const val PANEL_HUD = "hud"
 const val PANEL_RESULT = "result"
 const val PANEL_MENU = "menu"
 const val PANEL_NOTE = "note"
+const val PANEL_COACH = "coach"
 
 val Ink = Color(0xFFF1F4F2)
 val Lake = Color(0xFF7FD0D8)
@@ -85,7 +86,7 @@ fun CardPanel(c: PhysicalLengthConverter) {
         Text("钓遍中国", fontSize = c.sz(0.034f), color = Sun)
         Text("西湖的柳岸、千岛湖的小船、漓江的竹筏、查干湖的冰面：坐下，抛竿，等一等，把各地的名鱼钓上来。", fontSize = c.sz(0.016f), color = Ink)
         Text("怎么玩", fontSize = c.sz(0.018f), color = Lake)
-        Text("· 看着想抛的方向，捏一下开始蓄力，再捏一下抛出。\n· 浮漂轻轻点一下是鱼在试探，别动；整个沉下去才捏。\n· 中鱼后捏住右手边的绕线轮画圈收线；鱼冲刺时（线绷紧变红）停手，不然会断。\n· 鱼游近、没力气了，捏右边的抄网。左边的饵盒可以换饵。", fontSize = c.sz(0.015f), color = Ink)
+        Text("· 捏住鱼竿往肩后拉一下，再往前一甩：甩得越快抛得越远。\n· 浮漂轻轻点一下是鱼在试探，别动；整个沉下去时，捏住鱼竿往上一提。\n· 中鱼后捏住绕线轮画圈收线；鱼冲刺时（线绷紧变红）停手，不然会断。\n· 鱼游近、没力气了，捏住右边的抄网往下一兜。左边的饵盒可以换饵。\n· 不方便甩竿时，看着水面捏两下也能抛竿。", fontSize = c.sz(0.015f), color = Ink)
         if (pr.stars > 0) Text("已得 ${pr.stars} / ${pr.maxStars} 颗星。", fontSize = c.sz(0.014f), color = Lake)
         CallToAction(c, if (pr.stars > 0) "继续 →" else "出发 →") { Game.start() }
     }
@@ -120,6 +121,12 @@ fun HudPanel(c: PhysicalLengthConverter, toggle: (String) -> Unit) {
             Trip.State.FIGHT, Trip.State.NETTABLE -> {
                 Bar(c, if (t.running > 0) "鱼在冲！停手！" else "张力", t.tension, if (t.tension > 0.75 || t.running > 0) Danger else Lake)
                 Text("距离 ${"%.1f".format(t.distance)} 米", fontSize = c.sz(0.013f), color = Dim)
+                // When the net works, plainly (2026-11-13 device test: the net seemed to do nothing).
+                Bar(c, "鱼的力气", Trip.strengthLeft(t), if (Trip.strengthLeft(t) < Trip.NET_TIRED) Lake else Sun)
+                Text(
+                    if (t.state == Trip.State.NETTABLE) "现在捏右边的抄网！" else "离你 ${Trip.NET_DIST} 米内、力气低于 ${(Trip.NET_TIRED * 100).toInt()}% 时可以抄网",
+                    fontSize = c.sz(0.013f), color = if (t.state == Trip.State.NETTABLE) Sun else Dim,
+                )
             }
             else -> Unit
         }
@@ -203,5 +210,29 @@ fun WindowHeader(id: String, title: String, size: TextUnit) {
         Text(title, fontSize = size, color = Sun)
         Spacer(Modifier.weight(1f))
         Button(onClick = { Game.closeWindow(id) }) { Text("关闭", fontSize = 22.sp) }
+    }
+}
+
+
+/**
+ * The first-time guide (2026-11-12 review: it was not clear how to fish step by step): beside the rod,
+ * what to do now, until the player has done that step once. Nothing shows once all four are learned.
+ */
+@Composable
+fun CoachPanel(c: PhysicalLengthConverter) {
+    Game.version
+    val t = Game.trip ?: return
+    val l = Game.learnedSteps
+    val (step, text) = when (t.state) {
+        Trip.State.READY, Trip.State.LANDED, Trip.State.POWER -> "cast" to "① 抛竿：捏住鱼竿，往肩后拉一下，再往前一甩。甩得越快，抛得越远。"
+        Trip.State.WAIT -> "strike" to "② 看浮漂：轻轻点水是鱼在试探，别动。整个沉下去时，捏住鱼竿往上一提。"
+        Trip.State.BITE -> "strike" to "沉下去了！捏住鱼竿往上提！"
+        Trip.State.FIGHT -> "reel" to "③ 收线：捏住绕线轮绕圈。鱼往外冲、线变红时停手，不然会断线。"
+        Trip.State.NETTABLE -> "net" to "④ 抄鱼：鱼没力气了。捏住右边的抄网，朝鱼往下一兜。"
+    }
+    if (step in l) return
+    PanelBox(c, 0.3f) {
+        Text("手把手", fontSize = c.sz(0.013f), color = Sun)
+        Text(text, fontSize = c.sz(0.017f), color = Ink)
     }
 }

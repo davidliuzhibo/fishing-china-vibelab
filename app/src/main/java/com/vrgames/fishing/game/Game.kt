@@ -69,6 +69,7 @@ object Game {
         prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).also { p ->
             musicOn = p.getBoolean("music", true)
             progress = Progress.load(p.getString("progress", null))
+            learnedSteps = p.getString("learned", "")!!.split(",").filter { it.isNotEmpty() }.toSet()
         }
         AutoPilot.register(context)
     }
@@ -110,26 +111,71 @@ object Game {
         val r = synchronized(lock) { t.press() }
         when (r) {
             "power" -> sound?.play(Sfx.BAIT)
-            "cast" -> { sound?.play(Sfx.CAST); view?.plop(t); sound?.play(Sfx.PLOP, Vec3(0.0, 0.0, -t.castDist)) }
-            "hooked" -> { sound?.play(Sfx.STRIKE); say("中鱼了！转绕线轮收线，鱼冲的时候停手。") }
+            "cast" -> { sound?.play(Sfx.CAST); view?.plop(t); sound?.play(Sfx.PLOP, Vec3(0.0, 0.0, -t.castDist)); learned("cast") }
+            "hooked" -> { sound?.play(Sfx.STRIKE); learned("strike"); say("中鱼了！转绕线轮收线，鱼冲的时候停手。") }
             "spooked" -> { sound?.play(Sfx.WRONG); say("太早了！那只是鱼在试探，把它吓跑了。等浮漂整个沉下去再捏。") }
         }
         version++
+    }
+
+    /** Cast with the arm: [power] from the flick. */
+    fun castBy(power: Double) {
+        val t = trip ?: return
+        if (phase != Phase.PLAYING) return
+        t.aimYaw = aimYaw.coerceIn(-70.0, 70.0)
+        val r = synchronized(lock) { t.cast(power) }
+        if (r == "cast") { sound?.play(Sfx.CAST); view?.plop(t); sound?.play(Sfx.PLOP, Vec3(0.0, 0.0, -t.castDist)); learned("cast") }
+        version++
+    }
+
+    /** The rod jerked up: strike. */
+    fun strikeBy() {
+        val t = trip ?: return
+        if (phase != Phase.PLAYING) return
+        val r = synchronized(lock) { t.strike() }
+        when (r) {
+            "hooked" -> { sound?.play(Sfx.STRIKE); learned("strike"); say("中鱼了！转绕线轮收线，鱼冲的时候停手。") }
+            "spooked" -> { sound?.play(Sfx.WRONG); say("浮漂只是轻轻一点，鱼还在试探。等它沉下去再提竿。") }
+        }
+        version++
+    }
+
+    /**
+     * What the first-time guide has already seen done (cast, strike, reel, net): each step's hint shows
+     * near what it is about until the player has done it once (2026-11-12 review: no guidance).
+     */
+    var learnedSteps by mutableStateOf(setOf<String>()); private set
+
+    fun learned(step: String) {
+        if (step in learnedSteps) return
+        learnedSteps = learnedSteps + step
+        prefs?.edit()?.putString("learned", learnedSteps.joinToString(","))?.apply()
     }
 
     fun reel(turns: Double) {
         val t = trip ?: return
         if (phase != Phase.PLAYING) return
         synchronized(lock) { t.reel(turns) }
+        if (t.state == Trip.State.FIGHT || t.state == Trip.State.NETTABLE) learned("reel")
     }
 
     fun net() {
         val t = trip ?: return
         val ok = synchronized(lock) { t.net() }
         if (!ok) {
-            say(if (t.state == Trip.State.FIGHT) "鱼还有力气、离得太远，先收线遛一遛。" else "还没有鱼可以抄。")
+            // Say exactly what is missing: how far, how much strength (2026-11-13 device test: pinching the net seemed to
+            // do nothing, the reason went unseen).
+            sound?.play(Sfx.NIBBLE)
+            say(if (t.state == Trip.State.FIGHT) {
+                val far = t.distance > Trip.NET_DIST
+                val strong = Trip.strengthLeft(t) >= Trip.NET_TIRED
+                "还不能抄：鱼" + (if (far) "离你 ${"%.1f".format(t.distance)} 米（要 ${Trip.NET_DIST} 米内）" else "已经够近") +
+                    "，" + (if (strong) "还有 ${(Trip.strengthLeft(t) * 100).toInt()}% 力气（要低于 ${(Trip.NET_TIRED * 100).toInt()}%）" else "力气够小了") +
+                    "。继续收线遛它，抄网发亮时再捏。"
+            } else "还没有鱼可以抄。")
             return
         }
+        learned("net")
         afterLanding(t)
     }
 
@@ -173,11 +219,12 @@ object Game {
         }
         for (e in evs) when (e) {
             "nibble" -> sound?.play(Sfx.NIBBLE)
-            "bite" -> { sound?.play(Sfx.BITE); say("沉下去了！快捏！") }
-            "missed" -> say("没捏到，鱼跑了。再等等……")
+            "bite" -> { sound?.play(Sfx.BITE); say("沉下去了！鱼咬钩了，捏住鱼竿往上提！") }
+            "biting" -> { sound?.play(Sfx.NIBBLE); say("鱼还咬着！捏住鱼竿往上一提。") }
+            "missed" -> say("等了太久，鱼吐钩跑了。再等等……")
             "run" -> sound?.play(Sfx.RUN)
             "break" -> { sound?.play(Sfx.SNAP); say("线断了！鱼冲的时候要停手放线。") }
-            "nettable" -> { sound?.play(Sfx.SPLASH); say("鱼没力气了，捏一下右边的抄网！") }
+            "nettable" -> { sound?.play(Sfx.SPLASH); say("鱼没力气了！抄网亮了，捏一下右边的抄网。") }
         }
         if (evs.isNotEmpty()) version++
     }

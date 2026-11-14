@@ -46,7 +46,10 @@ import com.vrgames.fishing.MAP_ID
 import com.vrgames.fishing.core.Lakes
 import com.vrgames.fishing.game.AutoPilot
 import com.vrgames.fishing.game.Game
+import com.vrgames.fishing.core.Trip
+import com.vrgames.fishing.render.HandTurn
 import com.vrgames.fishing.render.LakeView
+import com.pico.spatial.core.container.SpatialViewContent
 import com.vrgames.fishing.render.Music
 import com.vrgames.fishing.render.Sfx
 import com.vrgames.fishing.render.Sound
@@ -77,6 +80,10 @@ fun LakeStage() {
     val seat = remember { Seat() }
     val panels = remember { HashMap<String, Entity>() }
     val crank = remember { Crank() }
+    // The rod and the net held by the hand (2026-11-10/12 reviews: cast, strike and net by hand).
+    val arm = remember { ArmGesture() }
+    val handTurn = remember { HandTurn() }
+    val contentRef = remember { arrayOfNulls<SpatialViewContent>(1) }
     val ibls = remember { HashMap<String, TextureResource>() }
     val appVersion = remember { runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull().orEmpty() }
 
@@ -132,7 +139,7 @@ fun LakeStage() {
         kotlinx.coroutines.delay(if (n.length > 40) 9000 else 6000)
         if (Game.note == n) Game.note = null
     }
-    LaunchedEffect(Game.phase, Game.menuOpen, Game.note, view) {
+    LaunchedEffect(Game.phase, Game.menuOpen, Game.note, Game.learnedSteps, view) {
         fun show(id: String, on: Boolean) = panels[id]?.let { if (it.enabled != on) it.enabled = on }
         val ph = Game.phase
         show(PANEL_CARD, ph == Game.Phase.CARD)
@@ -140,6 +147,7 @@ fun LakeStage() {
         show(PANEL_RESULT, ph == Game.Phase.RESULT)
         show(PANEL_HUD, ph == Game.Phase.PLAYING)
         show(PANEL_NOTE, Game.note != null)
+        show(PANEL_COACH, ph == Game.Phase.PLAYING && Game.learnedSteps.size < 4)
         show(PANEL_MENU, true)
     }
     LaunchedEffect(Game.debugOpen) {
@@ -178,10 +186,26 @@ fun LakeStage() {
                 detectSpatialDragGesture(
                     context = context,
                     targetedToEntity = TargetEntity.any(),
-                    onDragStart = { _, value -> crank.on = view?.hitOf(value.targetEntity) == "reel"; crank.reset() },
-                    onDragEnd = { crank.on = false },
-                    onDragCancel = { crank.on = false },
+                    onDragStart = { _, value ->
+                        val id = view?.hitOf(value.targetEntity)
+                        crank.on = id == "reel"; crank.reset()
+                        arm.begin(id)
+                        handTurn.reset()
+                        handTurn.twist(contentRef[0], runCatching { value.inputDevicePose.rawRotation.toQuaternion() }.getOrNull(), 1.0, 0.0, 0.0)
+                    },
+                    onDragEnd = { crank.on = false; main.post { arm.end(view) } },
+                    onDragCancel = { crank.on = false; main.post { arm.end(view) } },
                 ) { value ->
+                    if (arm.held != null) {
+                        // Into the player's frame: forward is where the seat faces; y is up.
+                        val f = Math.toRadians(seat.heading.toDouble())
+                        val dx = meters(value.dragAmount.x); val dz = meters(value.dragAmount.z)
+                        val forward = -(dz * cos(f) + dx * sin(f))
+                        val up = -meters(value.dragAmount.y)
+                        val (pitch, yaw) = handTurn.twistPair(contentRef[0], runCatching { value.inputDevicePose.rawRotation.toQuaternion() }.getOrNull(), cos(f), 0.0, -sin(f), 0.0, 1.0, 0.0)
+                        main.post { arm.move(forward, up, pitch, yaw, view) }
+                        return@detectSpatialDragGesture
+                    }
                     if (!crank.on) return@detectSpatialDragGesture
                     val turns = crank.move(meters(value.dragAmount.x), -meters(value.dragAmount.y))
                     if (turns != 0.0) main.post {
@@ -196,12 +220,14 @@ fun LakeStage() {
             AttachmentPanel(PANEL_HUD) { HudPanel(converter, toggleWindow) }
             AttachmentPanel(PANEL_RESULT) { ResultPanel(converter, toggleWindow) }
             AttachmentPanel(PANEL_NOTE) { NotePanel(converter) }
+            AttachmentPanel(PANEL_COACH) { CoachPanel(converter) }
             AttachmentPanel(PANEL_MENU) {
                 MenuPanel(converter, toggleWindow, faceMe = { Game.faceRequest++ }, quit = { context.findActivity()?.finishAndRemoveTask() }, version = appVersion)
             }
         },
         update = { _, attachments -> view?.let { attach(it, attachments, panels) } },
         initial = { content, attachments ->
+            contentRef[0] = content
             content.addEntity(Entity().apply {
                 components.set(DirectionalLightComponent(Color(0xFFFFF1DC).toColor4(), 1200f, true))
                 components[TransformComponent::class.java]?.setEulerAngles(EulerAngles(-45f, 30f, 0f))
@@ -248,6 +274,77 @@ fun LakeStage() {
     )
 }
 
+/**
+ * The rod or the net in the hand. The rod: pull it back toward the shoulder (8 cm or more) and flick it
+ * forward to cast, the faster the farther; lift it sharply to strike; it turns with the hand's own turn
+ * while held. The net: dip it down and forward toward the fish to land it.
+ */
+private class ArmGesture {
+    var held: String? = null; private set
+    private var back = 0.0
+    private var drawn = false
+    private var lastT = 0L
+    private var lift = 0.0
+    private var dip = 0.0
+    private var turnPitch = 0.0
+    private var turnYaw = 0.0
+    private var done = false
+
+    fun begin(id: String?) {
+        held = if (id == "rod" || id == "net") id else null
+        back = 0.0; drawn = false; lift = 0.0; dip = 0.0; turnPitch = 0.0; turnYaw = 0.0; done = false
+        lastT = android.os.SystemClock.uptimeMillis()
+    }
+
+    /** One move of the hand (main thread): [forward] and [up] in meters, the hand's turn in degrees. */
+    fun move(forward: Double, up: Double, pitch: Double, yaw: Double, v: LakeView?) {
+        val now = android.os.SystemClock.uptimeMillis()
+        val dt = ((now - lastT) / 1000.0).coerceIn(0.008, 0.2)
+        lastT = now
+        val t = Game.trip ?: return
+        when (held) {
+            "rod" -> {
+                turnPitch = (turnPitch + pitch).coerceIn(-25.0, 25.0)
+                turnYaw = (turnYaw + yaw).coerceIn(-30.0, 30.0)
+                v?.handPitch = turnPitch.toFloat()
+                v?.handYaw = turnYaw.toFloat()
+                if (done) return
+                val ready = t.state == Trip.State.READY || t.state == Trip.State.LANDED || t.state == Trip.State.POWER
+                if (ready) {
+                    // Pulling back loads the cast; the flick forward lets it go.
+                    if (forward < 0) back = (back - forward).coerceAtMost(0.3)
+                    if (!drawn && back >= DRAW_M) { drawn = true; Game.sound?.play(Sfx.BAIT) }
+                    v?.drawnBack = (back / 0.25).coerceIn(0.0, 1.0).toFloat()
+                    val speed = forward / dt
+                    if (drawn && speed > FLICK_MPS) {
+                        done = true
+                        v?.drawnBack = 0f
+                        Game.castBy(((speed - FLICK_MPS) / 1.6 + back).coerceIn(0.05, 1.0))
+                    }
+                } else if (t.state == Trip.State.WAIT || t.state == Trip.State.BITE) {
+                    lift = (lift + up).coerceAtLeast(0.0)
+                    if (up / dt > STRIKE_MPS || lift > 0.08) { done = true; Game.strikeBy() }
+                }
+            }
+            "net" -> {
+                dip += (-up).coerceAtLeast(0.0) + forward.coerceAtLeast(0.0)
+                if (!done && dip > 0.1 && t.state == Trip.State.NETTABLE) { done = true; Game.net() }
+            }
+        }
+    }
+
+    fun end(v: LakeView?) {
+        if (held == "rod") { v?.handPitch = 0f; v?.handYaw = 0f; v?.drawnBack = 0f }
+        held = null
+    }
+
+    companion object {
+        const val DRAW_M = 0.08
+        const val FLICK_MPS = 0.7
+        const val STRIKE_MPS = 0.6
+    }
+}
+
 /** Turning the reel by moving the pinched hand in a circle: the angle swept, in turns. */
 private class Crank {
     var on = false
@@ -274,7 +371,7 @@ private class Crank {
 }
 
 /** Textures and models loaded if present (see docs/素材来源.md). */
-private val MODELS = listOf("sky", "rod", "baitbox", "boat", "raft", "crucian", "bream", "bighead", "silver", "culter", "mandarin", "catfish", "carp", "koi")
+private val MODELS = listOf("sky", "rod", "baitbox", "boat", "raft", "crucian", "bream", "bighead", "silver", "culter", "mandarin", "catfish", "carp", "koi", "basket", "willow", "rail", "cormorant", "hat", "icetent", "auger", "karst")
 
 private fun attach(v: LakeView, a: SpatialViewAttachments, panels: HashMap<String, Entity>) {
     fun put(id: String, pos: Vector3, pitch: Float, yaw: Float = 0f) {
@@ -289,8 +386,11 @@ private fun attach(v: LakeView, a: SpatialViewAttachments, panels: HashMap<Strin
     put(PANEL_INTRO, Vector3(0f, 1.25f, -1.1f), 0f)
     put(PANEL_RESULT, Vector3(0f, 1.25f, -1.1f), 0f)
     put(PANEL_HUD, Vector3(-0.5f, 0.85f, -0.5f), -25f, 35f)
-    put(PANEL_NOTE, Vector3(0f, 1.62f, -1.3f), 5f)
+    // Low enough to be read while looking down at the water and the net.
+    put(PANEL_NOTE, Vector3(0f, 1.36f, -1.15f), 0f)
     put(PANEL_MENU, Vector3(-0.42f, 0.66f, -0.38f), -45f, 30f)
+    // Just above and beside the rod, where the hand and the eye already are.
+    put(PANEL_COACH, Vector3(0.42f, 1.16f, -0.62f), -6f, -22f)
 }
 
 /** Where the player sits; turned once to the head's mean heading; tracks the aim (head yaw). */
@@ -298,6 +398,8 @@ private class Seat {
     var root: Entity? = null
     private var placed = false
     private var facing = 0f
+    /** Which way the seat faces (degrees about y). */
+    val heading get() = facing
     private val headings = ArrayList<Float>()
     private var started = 0L
 

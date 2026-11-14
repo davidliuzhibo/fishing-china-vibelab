@@ -172,6 +172,19 @@ class Trip(val lake: Lake, seed: Long = lake.id.hashCode().toLong()) {
         }
     }
 
+    /**
+     * A cast made by the arm (2026-11-10 review: cast with the hand): pull the rod back, then flick it
+     * forward; [p] (0..1) comes from how fast the flick was. On ice the hole is right below.
+     */
+    fun cast(p: Double): String {
+        if (state != State.READY && state != State.LANDED && state != State.POWER) return "nothing"
+        events.clear()
+        return castNow(if (lake.ice) 0.3 else p.coerceIn(0.0, 1.0))
+    }
+
+    /** The rod lifted sharply: a strike (the same as the one button while waiting or bitten). */
+    fun strike(): String = if (state == State.WAIT || state == State.BITE) press() else "nothing"
+
     private fun castNow(p: Double): String {
         casts++
         castDist = if (lake.ice) 0.0 else 3.0 + 13.0 * p
@@ -261,7 +274,10 @@ class Trip(val lake: Lake, seed: Long = lake.id.hashCode().toLong()) {
                 }
             }
             State.BITE -> {
+                val before = biteLeft
                 biteLeft -= dt
+                // Still on: the float stays down and the player is reminded now and then.
+                if (biteLeft > 0 && kotlin.math.floor((BITE_WINDOW - biteLeft) / BITE_REMIND) > kotlin.math.floor((BITE_WINDOW - before) / BITE_REMIND)) events += "biting"
                 if (biteLeft <= 0) {
                     state = State.WAIT
                     waitLeft = 3 + rand() * 4
@@ -303,7 +319,7 @@ class Trip(val lake: Lake, seed: Long = lake.id.hashCode().toLong()) {
         distance -= rate * REEL_METERS * (1.0 - 0.6 * (if (running > 0) 1.0 else 0.0)) * dt
         distance = distance.coerceIn(0.5, 30.0)
         stamina -= dt * (0.4 + tension)
-        if (distance <= NET_DIST && stamina < s.stamina * 0.35) {
+        if (distance <= NET_DIST && stamina < s.stamina * NET_TIRED) {
             if (state != State.NETTABLE) events += "nettable"
             state = State.NETTABLE
         } else if (state == State.NETTABLE && distance > NET_DIST + 0.5) state = State.FIGHT
@@ -315,11 +331,24 @@ class Trip(val lake: Lake, seed: Long = lake.id.hashCode().toLong()) {
     companion object {
         const val STEP = 0.05
         const val POWER_PERIOD = 1.4
-        const val BITE_WINDOW = 0.6
+        /**
+         * How long a real bite holds the float down (2026-11-13 device test: 0.6 s was gone before anyone could react, and
+         * the take looped nibble, bite, "missed" for ever). Ten seconds, with a reminder every few seconds.
+         */
+        const val BITE_WINDOW = 10.0
+        const val BITE_REMIND = 3.0
         /** Tension added per turn a second of reeling, and meters brought in per turn. */
         const val REEL_TENSION = 0.16
         const val REEL_METERS = 0.9
         const val NET_DIST = 1.8
+        /**
+         * The fish can be netted once its strength is below this share (was 0.35; 2026-11-13 device test: a fish a metre
+         * off still could not be netted, and nothing said why).
+         */
+        const val NET_TIRED = 0.6
+
+        /** How much strength the hooked fish has left, 0..1. */
+        fun strengthLeft(t: Trip): Double = t.fish?.let { (t.stamina / (it.stamina + 1e-9)).coerceIn(0.0, 1.0) } ?: 0.0
     }
 }
 

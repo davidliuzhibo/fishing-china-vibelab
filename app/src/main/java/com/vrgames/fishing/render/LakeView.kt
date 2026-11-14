@@ -95,6 +95,11 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
         addChild(top)
     }
 
+    private val netGlow = model(MeshResource.createTorus(0.2f, 0.186f), glow(color(1f, 0.85f, 0.35f, 0.9f)).shared()).apply {
+        transform().eulerAngles = EulerAngles(90f, 0f, 0f)
+    }
+    private var glowT = 0.0
+
     init {
         // The rod in front, slightly right, pointing out over the water.
         rod.setPos(Vector3(0.22f, 0.95f, -0.3f))
@@ -106,6 +111,11 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
             rod.addChild(rm)
         } else rod.addChild(model(MeshResource.createCylinder(ROD_LEN, 0.008f), rodMat).apply { setPos(Vector3(0f, 0f, -ROD_LEN / 2)); transform().eulerAngles = EulerAngles(90f, 0f, 0f) })
         rodTip.setPos(Vector3(0f, 0f, -ROD_LEN))
+        // The rod is held, not just looked at (2026-11-12 review: the rod and the net had a hover but did nothing).
+        rod.components.set(CollisionComponent(listOf(ShapeResource.createBox(Vector3(0.12f, 0.12f, 0.55f)).offsetByTranslation(Vector3(0f, 0f, -0.18f))), PhysicsMaterialResource()))
+        rod.components.set(InteractableComponent())
+        rod.components.set(HoverEffectComponent())
+        hits[rod] = "rod"
         // The reel: a crank to pinch and turn.
         val reel = Entity().apply { setPos(Vector3(0.0f, -0.05f, -0.12f)) }
         reel.addChild(model(MeshResource.createCylinder(0.03f, 0.03f), chrome).apply { transform().eulerAngles = EulerAngles(0f, 0f, 90f) })
@@ -126,9 +136,15 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
         net.addChild(landingNet())
         hit(net, "net", Vector3(0.25f, 0.5f, 0.25f))
         root.addChild(net)
+        // A ring of light round the net when the fish can be landed.
+        netGlow.setPos(Vector3(0.55f, 0.62f, -0.5f))
+        netGlow.enabled = false
+        root.addChild(netGlow)
         // Everything at the side stays half a metre out, clear of the seated body.
         basket.setPos(Vector3(-0.62f, 0.45f, -0.4f))
-        basket.addChild(model(MeshResource.createCylinder(0.16f, 0.12f), pbr(color(0.62f, 0.5f, 0.3f), roughness = 0.9f)))
+        // A woven bamboo creel (SGS model, 2026-11-12); a plain tub until it loads. It stays the first child.
+        basket.addChild(models["basket"]?.clone(Entity.CloneOptions(true, true))?.apply { setScale(0.3f); setPos(Vector3(0f, -0.08f, 0f)) }
+            ?: model(MeshResource.createCylinder(0.16f, 0.12f), pbr(color(0.62f, 0.5f, 0.3f), roughness = 0.9f)))
         fishHolder.enabled = false
         shown.enabled = false
     }
@@ -182,37 +198,89 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
                 // A stone embankment under the seat.
                 placeRoot.addChild(model(MeshResource.createBox(Vector3(3f, 0.5f, 1.6f), 0.02f), stone).apply { setPos(Vector3(0f, 0.1f, 0.6f)) })
                 for (k in 0 until 6) placeRoot.addChild(model(MeshResource.createBox(Vector3(0.5f, 0.06f, 0.3f), 0.01f), stone).apply { setPos(Vector3(-1.25f + k * 0.5f, 0.38f, -0.15f)) })
+                // 2026-11-12 (review: the scene was rough): willows either side, stone railings at the ends.
+                prop("willow", 3.2f, -1.7f, 0.35f, 0.1f, 20f)
+                prop("willow", 2.6f, 1.9f, 0.35f, 0.4f, -40f)
+                prop("rail", 1.1f, -1.25f, 0.41f, 0.35f, 90f)
+                prop("rail", 1.1f, 1.25f, 0.41f, 0.35f, -90f)
             }
             "qiandao" -> models["boat"]?.clone(Entity.CloneOptions(true, true))?.let { b -> b.setScale(1.4f); b.setPos(Vector3(0f, -0.15f, 0.3f)); b.transform().eulerAngles = EulerAngles(0f, 90f, 0f); placeRoot.addChild(b) }
                 ?: placeRoot.addChild(model(MeshResource.createBox(Vector3(1.2f, 0.3f, 3f), 0.1f), wood).apply { setPos(Vector3(0f, 0.05f, 0.4f)) })
             "lijiang" -> {
                 models["raft"]?.clone(Entity.CloneOptions(true, true))?.let { b -> b.setScale(0.9f); b.setPos(Vector3(0f, -0.05f, 0.3f)); b.transform().eulerAngles = EulerAngles(0f, 90f, 0f); placeRoot.addChild(b) }
                     ?: placeRoot.addChild(model(MeshResource.createBox(Vector3(1.2f, 0.12f, 3f), 0.03f), pbr(color(0.5f, 0.6f, 0.3f), roughness = 0.7f)).apply { setPos(Vector3(0f, 0.03f, 0.4f)) })
-                for ((yaw, dist) in l.rocksAt) {
+                for ((k, rp) in l.rocksAt.withIndex()) {
+                    val (yaw, dist) = rp
                     val a = Math.toRadians(yaw)
-                    placeRoot.addChild(model(sphere, stone).apply {
-                        setPos(Vector3((dist * sin(a)).toFloat(), 0.3f, (-dist * cos(a)).toFloat()))
+                    val x = (dist * sin(a)).toFloat(); val z = (-dist * cos(a)).toFloat()
+                    // Karst rocks (SGS model) where the mandarin fish hide; plain boulders until it loads.
+                    if (!prop("karst", 1.8f + 0.4f * (k % 2), x, -0.25f, z, 37f * k)) placeRoot.addChild(model(sphere, stone).apply {
+                        setPos(Vector3(x, 0.3f, z))
                         transform().setScaleVector(Vector3(1.4f, 0.8f, 1.1f))
                     })
                 }
+                // A cormorant on its pole and a bamboo hat on the raft.
+                prop("cormorant", 0.55f, 0.75f, 0.1f, 0.15f, -30f)
+                prop("hat", 0.42f, -0.55f, 0.13f, 0.45f, 15f)
             }
             else -> {
                 // The ice hole in front.
                 placeRoot.addChild(model(MeshResource.createCylinder(0.03f, 0.22f), dark).apply { setPos(Vector3(0.2f, 0.0f, -0.75f)) })
                 placeRoot.addChild(model(MeshResource.createTorus(0.23f, 0.03f), iceMat).apply { setPos(Vector3(0.2f, 0.01f, -0.75f)) })
+                // The ice camp: a windbreak tent behind at the left, the auger that cut the hole.
+                prop("icetent", 1.9f, -1.7f, 0f, 0.6f, 35f)
+                prop("auger", 1.0f, 0.75f, 0f, -0.35f, -20f)
             }
         }
         receive(root)
     }
 
+    /**
+     * Puts model [name] (1 m along its longest side, standing on its origin) at [size] meters, at
+     * x, y, z turned [yaw] degrees; false when the model is not there (the caller may stand in for it).
+     */
+    private fun prop(name: String, size: Float, x: Float, y: Float, z: Float, yaw: Float): Boolean {
+        val m = models[name]?.clone(Entity.CloneOptions(true, true)) ?: return false
+        m.setScale(size)
+        m.setPos(Vector3(x, y, z))
+        m.transform().eulerAngles = EulerAngles(0f, yaw, 0f)
+        placeRoot.addChild(m)
+        return true
+    }
+
     // ---- Each frame ----
+
+    // The rod's pose: where it points follows what is happening (2026-11-10 review: after the cast the
+    // rod's angle was wrong and never changed), plus the holding hand's own turn while it is held.
+    private var rodPitch = 32f
+    private var rodYaw = 0f
+    /** Set by the stage while the rod is held: degrees the hand has turned it, and pulled back for a cast. */
+    var handPitch = 0f
+    var handYaw = 0f
+    var drawnBack = 0f
 
     /** The float, line, rod bend, the fighting fish, the aim marker, from the trip's state. */
     fun sync(t: Trip, aimYaw: Double) {
+        val canNet = t.state == Trip.State.NETTABLE
+        if (netGlow.enabled != canNet) netGlow.enabled = canNet
+        if (canNet) { glowT += 0.016; val k = (1f + 0.12f * kotlin.math.sin(glowT * 6).toFloat()); netGlow.transform().setScaleVector(Vector3(k)) }
         val tip = rodTip.convertPositionTo(Vector3(0f, 0f, 0f), root)
         val targetBend = when (t.state) { Trip.State.FIGHT, Trip.State.NETTABLE -> (t.tension * 28).toFloat(); Trip.State.BITE -> 10f; else -> 0f }
         bend += (targetBend - bend) * 0.2f
-        rod.transform().eulerAngles = EulerAngles(32f - bend, 0f, 0f)
+        // Up and ready before a cast (drawn back over the shoulder while the arm loads it), low toward
+        // the float while it waits, raised and turned toward the fish while fighting it.
+        val waiting = t.state == Trip.State.WAIT || t.state == Trip.State.BITE
+        val fightingNow = t.state == Trip.State.FIGHT || t.state == Trip.State.NETTABLE
+        val wantPitch = when {
+            waiting -> 14f
+            fightingNow -> 48f
+            else -> 32f + 40f * drawnBack
+        } - bend + handPitch
+        val toFloat = if (waiting || fightingNow) (-t.castYaw).toFloat() * 0.8f else (-aimYaw).toFloat() * 0.5f
+        val wantYaw = toFloat + handYaw
+        rodPitch += (wantPitch - rodPitch) * 0.18f
+        rodYaw += (wantYaw - rodYaw) * 0.18f
+        rod.transform().eulerAngles = EulerAngles(rodPitch, rodYaw, 0f)
         // Where the float is.
         val out = t.state != Trip.State.READY && t.state != Trip.State.POWER && t.state != Trip.State.LANDED
         if (float.enabled != out) float.enabled = out
