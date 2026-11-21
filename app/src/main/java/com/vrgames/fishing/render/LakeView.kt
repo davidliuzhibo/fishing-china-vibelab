@@ -19,8 +19,10 @@ import com.pico.spatial.core.ecs.resource.TextureResource
 import com.pico.spatial.core.ecs.resource.UnlitMaterial
 import com.pico.spatial.core.math.EulerAngles
 import com.pico.spatial.core.math.Vector3
+import com.vrgames.fishing.core.OverheadCast
 import com.vrgames.fishing.core.Fish
 import com.vrgames.fishing.core.Lake
+import com.vrgames.fishing.core.Layout
 import com.vrgames.fishing.core.Trip
 import com.vrgames.fishing.core.Vec3
 import kotlin.math.atan2
@@ -39,15 +41,57 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
     val root = Entity()
     private var placeRoot = Entity().also { root.addChild(it) }
     private val hits = HashMap<Entity, String>()
+    /** One entity per pinch target (debug hook `gaze`: a pinch delivered as if on it). */
+    private val hitEntities = HashMap<String, Entity>()
     private val sphere = MeshResource.createSphere(1f).shared()
     private val splash = Sparks("splash", 200, sphere, pbr(color(0.9f, 0.95f, 1f, 0.8f), roughness = 0.2f, blending = BlendingMode.TRANSPARENT).shared()).also { root.addChild(it.entity) }
     private val sparkle = Sparks("sparkle", 120, sphere, glow(color(1f, 0.85f, 0.4f, 1f)).shared()).also { root.addChild(it.entity) }
     private val iblSource = Entity().also { root.addChild(it) }
     private var sky: Entity? = null
     private var water: Entity? = null
-    private val rod = Entity().also { root.addChild(it) }
-    private val rodTip = Entity().also { rod.addChild(it) }
-    private val line = model(MeshResource.createCylinder(1f, 0.0012f), unlit(color(0.95f, 0.95f, 0.9f, 0.8f), BlendingMode.TRANSPARENT).shared()).also { root.addChild(it) }
+    private var water2: Entity? = null
+    // v0.3: the rod, reel, line and net as moving tackle (render/Tackle), and rings on the water (PICO 1117/1118).
+    private val tackle = Tackle(root)
+    private val rings = Ripples(root)
+    private val net = Entity().also { root.addChild(it) }
+    /**
+     * v0.5 (device test 2026-11-20: the net jumped into a resting hand while the fish was still 6–10 m out): the net is
+     * a see-through ghost with NO collider until the fish can be netted; then the solid net (two slim colliders, the
+     * pole and the hoop, clear of the panels' and the bait box's sight lines) with its glow.
+     */
+    private val netSolid = Entity()
+    private val netGhost = Entity()
+    private val poleNode = Entity()
+    private val hoopNode = Entity()
+    private var netActive = true
+    /** Set by the stage each frame from the hands (null: not in a hand). */
+    var handGrip: Vec3? = null
+    var handDir: Vec3? = null
+    var netHand: Vec3? = null
+    var netHoop: Vec3? = null
+    /** A cast's whip this frame (degrees), from the stage. */
+    var whip = 0.0
+    /** v0.5: radians the reel's crank has turned (from any winding). */
+    var crankSpin = 0.0
+    private var shownSpin = 0.0
+    private var kickT = -1.0
+    /** v0.4: hand tracking is the way in (the grip glows to be taken); a hand near the grip; a hand at the reel. */
+    var handsMode = false
+    var gripNear = false
+    var crankNear = false
+    /** v0.4: the next cast's launch angle (degrees), set before the cast, for the float's flight. */
+    var launchDeg = 30.0
+    /** v0.4: counts the float's landings (the hands put the rod back in its holder on the next one). */
+    var landings = 0; private set
+    private var lastState: Trip.State? = null
+    private var flight = -1.0
+    private var flightS = FLIGHT_S
+    private var flightArc = 0.5
+    private var flightFrom = Vec3.ZERO
+    private var flightTo = Vec3.ZERO
+    private var floatAt = Vec3.ZERO
+    private var bobT = 0.0
+    private var fishRingT = 0.0
     private val float = Entity().also { root.addChild(it) }
     private val fishHolder = Entity().also { root.addChild(it) }
     private var fishModel: Entity? = null
@@ -55,7 +99,6 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
     private val shown = Entity().also { root.addChild(it) }
     private var shownT = -1.0
     private val ripples = ArrayList<Pair<Entity, Double>>()
-    private val marker = model(MeshResource.createTorus(0.25f, 0.02f), glow(color(1f, 0.85f, 0.35f, 0.7f)).shared()).also { it.enabled = false; root.addChild(it) }
     private val basket = Entity().also { root.addChild(it) }
     private var clock = 0.0
     private var bend = 0f
@@ -70,14 +113,16 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
     private val chrome = pbr(color(0.8f, 0.82f, 0.85f), metallic = 0.9f, roughness = 0.25f).shared()
 
     /**
-     * The landing net, made here (an AI model cannot make a net's open mesh): a wooden handle, an
-     * aluminium hoop, and a bag of green netting (a see-through diamond mesh, both sides drawn).
+     * The landing net, made here (an AI model cannot make a net's open mesh): a wooden handle, an aluminium hoop, and a
+     * bag of green netting (a see-through diamond mesh, both sides drawn). Its handle runs along +y from the end at 0;
+     * the hoop's centre at 0.79. v0.5: the pole and the hoop each carry their own slim collider and hover glow.
      */
-    private fun landingNet() = Entity().apply {
-        addChild(model(MeshResource.createCylinder(0.62f, 0.011f), pbr(color(0.45f, 0.3f, 0.18f), roughness = 0.6f)).apply { setPos(Vector3(0f, 0.31f, 0f)) })
-        addChild(model(MeshResource.createCylinder(0.1f, 0.013f), pbr(color(0.1f, 0.1f, 0.1f), roughness = 0.9f)).apply { setPos(Vector3(0f, 0.08f, 0f)) })
-        val top = Entity().apply { setPos(Vector3(0f, 0.62f + 0.17f, 0f)) }
-        top.addChild(model(MeshResource.createTorus(0.17f, 0.158f), chrome))
+    private fun buildNet() {
+        val handleMat = pbr(color(0.45f, 0.3f, 0.18f), roughness = 0.6f)
+        val gripMat = pbr(color(0.1f, 0.1f, 0.1f), roughness = 0.9f)
+        poleNode.addChild(model(MeshResource.createCylinder(0.62f, 0.011f), handleMat).apply { setPos(Vector3(0f, 0.31f, 0f)) })
+        poleNode.addChild(model(MeshResource.createCylinder(0.1f, 0.013f), gripMat).apply { setPos(Vector3(0f, 0.08f, 0f)) })
+        poleNode.addChild(netGripGlow)
         val b = android.graphics.Bitmap.createBitmap(256, 256, android.graphics.Bitmap.Config.ARGB_8888)
         val cv = android.graphics.Canvas(b)
         val p = android.graphics.Paint().apply { isAntiAlias = true; color = 0xFF2F6B3A.toInt(); strokeWidth = 3f }
@@ -90,58 +135,78 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
             setOpacityThreshold(0.4f)
             setCullingMode(com.pico.spatial.core.ecs.resource.MaterialCullingMode.NONE)
         }
+        hoopNode.setPos(Vector3(0f, 0.79f, 0f))
+        // The hoop in the handle's plane (as a real landing net), so a held net scoops with its mouth up.
+        hoopNode.addChild(model(MeshResource.createTorus(0.17f, 0.158f), chrome).apply { transform().eulerAngles = EulerAngles(90f, 0f, 0f) })
         // The bag hangs below the hoop: a cone, point down.
-        top.addChild(model(MeshResource.createCone(0.24f, 0.165f), mesh).apply { setPos(Vector3(0f, -0.12f, 0f)); transform().eulerAngles = EulerAngles(180f, 0f, 0f) })
-        addChild(top)
+        hoopNode.addChild(model(MeshResource.createCone(0.24f, 0.165f), mesh).apply { setPos(Vector3(0f, 0f, -0.12f)); transform().eulerAngles = EulerAngles(-90f, 0f, 0f) })
+        hoopNode.addChild(netGlow)
+        hitBox(poleNode, "net", Layout.NET_POLE_SIZE.toVector3(), Layout.NET_POLE_C.toVector3())
+        hitBox(hoopNode, "net", Layout.NET_HOOP_SIZE.toVector3(), Vector3(0f, 0f, 0f))
+        netSolid.addChild(poleNode)
+        netSolid.addChild(hoopNode)
+        // The ghost: the same shapes, faint and see-through, nothing to pinch.
+        val ghost = UnlitMaterial.create(BlendingMode.TRANSPARENT).apply { setBaseColor(color(0.8f, 0.88f, 0.9f, 1f)); setOpacity(0.22f); setDepthWrite(false) }.shared()
+        netGhost.addChild(model(MeshResource.createCylinder(0.62f, 0.011f), ghost).apply { setPos(Vector3(0f, 0.31f, 0f)) })
+        netGhost.addChild(model(MeshResource.createTorus(0.17f, 0.158f), ghost).apply { setPos(Vector3(0f, 0.79f, 0f)); transform().eulerAngles = EulerAngles(90f, 0f, 0f) })
+        netGhost.addChild(model(MeshResource.createCone(0.24f, 0.165f), ghost).apply { setPos(Vector3(0f, 0.79f, -0.12f)); transform().eulerAngles = EulerAngles(-90f, 0f, 0f) })
+        net.addChild(netSolid)
+        net.addChild(netGhost)
+    }
+
+    /** v0.5: the net usable (solid, collider, glow) only while [on]; else a ghost far from any pinch. */
+    private fun netUsable(on: Boolean) {
+        if (netActive == on) return
+        netActive = on
+        netSolid.enabled = on
+        // Moved far below as well as disabled, so no collider of it can take a pinch meant for something else.
+        netSolid.setPos(if (on) Vector3(0f, 0f, 0f) else Vector3(0f, -100f, 0f))
+        netGhost.enabled = !on
+    }
+
+    private val netGripGlow = model(MeshResource.createCylinder(1f, 1f), rim(color(1f, 0.85f, 0.35f, 0.9f)).shared()).apply {
+        setPos(Vector3(0f, 0.1f, 0f))
+        transform().setScaleVector(Vector3(0.022f, 0.2f, 0.022f))
+        enabled = false
     }
 
     private val netGlow = model(MeshResource.createTorus(0.2f, 0.186f), glow(color(1f, 0.85f, 0.35f, 0.9f)).shared()).apply {
         transform().eulerAngles = EulerAngles(90f, 0f, 0f)
+        enabled = false
     }
     private var glowT = 0.0
 
+    /** v0.4: the rod's holder (a post with a Y fork) the rod rests in and pivots on, right in front of the player. */
+    private val holder = Entity().also { root.addChild(it) }
+
     init {
-        // The rod in front, slightly right, pointing out over the water.
-        rod.setPos(Vector3(0.22f, 0.95f, -0.3f))
-        rod.transform().eulerAngles = EulerAngles(32f, 0f, 0f)
-        val rm = models["rod"]?.clone(Entity.CloneOptions(true, true))
-        if (rm != null) {
-            rm.setScale(ROD_LEN)
-            rm.transform().eulerAngles = EulerAngles(-90f, 0f, 0f)
-            rod.addChild(rm)
-        } else rod.addChild(model(MeshResource.createCylinder(ROD_LEN, 0.008f), rodMat).apply { setPos(Vector3(0f, 0f, -ROD_LEN / 2)); transform().eulerAngles = EulerAngles(90f, 0f, 0f) })
-        rodTip.setPos(Vector3(0f, 0f, -ROD_LEN))
-        // The rod is held, not just looked at (2026-11-12 review: the rod and the net had a hover but did nothing).
-        rod.components.set(CollisionComponent(listOf(ShapeResource.createBox(Vector3(0.12f, 0.12f, 0.55f)).offsetByTranslation(Vector3(0f, 0f, -0.18f))), PhysicsMaterialResource()))
-        rod.components.set(InteractableComponent())
-        rod.components.set(HoverEffectComponent())
-        hits[rod] = "rod"
-        // The reel: a crank to pinch and turn.
-        val reel = Entity().apply { setPos(Vector3(0.0f, -0.05f, -0.12f)) }
-        reel.addChild(model(MeshResource.createCylinder(0.03f, 0.03f), chrome).apply { transform().eulerAngles = EulerAngles(0f, 0f, 90f) })
-        reel.addChild(model(MeshResource.createBox(Vector3(0.008f, 0.06f, 0.008f), 0.002f), chrome).apply { setPos(Vector3(0.022f, 0.025f, 0f)) })
-        reel.addChild(model(sphere, rodMat).apply { setPos(Vector3(0.03f, 0.05f, 0f)); setScale(0.012f) })
-        hit(reel, "reel", Vector3(0.12f, 0.12f, 0.12f))
-        rod.addChild(reel)
+        // v0.5: the gaze-and-pinch targets ride on the tackle itself: a slim box along the cork and reel seat ("rod"),
+        // a box round the reel ("reel"); each glows when looked at.
+        hitBox(tackle.handleNode, "rod", Vector3(0.06f, 0.30f, 0.07f), Vector3(0f, 0.01f, -0.01f))
+        hitBox(tackle.reelNode, "reel", Vector3(0.11f, 0.11f, 0.11f), Vector3(0f, 0.01f, -0.02f))
+        holder.setPos(PIVOT)
+        val post = PIVOT.y - 0.3
+        holder.addChild(model(MeshResource.createCylinder(1f, 1f), wood).apply { setPos(Vector3(0f, (-0.045 - post / 2).toFloat(), 0f)); transform().setScaleVector(Vector3(0.012f, post.toFloat(), 0.012f)) })
+        for (side in listOf(-1f, 1f)) holder.addChild(model(MeshResource.createCylinder(1f, 1f), wood).apply {
+            setPos(Vector3(side * 0.0175f, -0.045f + 0.03f, 0f))
+            transform().setScaleVector(Vector3(0.0055f, 0.07f, 0.0055f))
+            transform().eulerAngles = EulerAngles(0f, 0f, -side * 30f)
+        })
+        holder.addChild(model(sphere, rodMat).apply { setPos(Vector3(0f, -0.045f, 0f)); setScale(0.011f) })
         // The float.
         float.addChild(model(MeshResource.createCapsule(0.06f, 0.012f), red).apply { setPos(Vector3(0f, 0.02f, 0f)) })
         float.addChild(model(MeshResource.createCapsule(0.03f, 0.013f), white).apply { setPos(Vector3(0f, -0.01f, 0f)) })
-        float.enabled = false
-        // The bait box at the left, the net at the right.
-        val bait = Entity().apply { setPos(Vector3(-0.42f, 0.62f, -0.5f)) }
+        // The bait box at the left, the net on its rest at the right.
+        val bait = Entity().apply { setPos(Layout.BAIT.toVector3()) }
         (models["baitbox"]?.clone(Entity.CloneOptions(true, true))?.also { it.setScale(0.12f) } ?: model(MeshResource.createBox(Vector3(0.18f, 0.06f, 0.12f), 0.01f), wood)).let { bait.addChild(it) }
         hit(bait, "bait", Vector3(0.2f, 0.12f, 0.16f))
         root.addChild(bait)
-        val net = Entity().apply { setPos(Vector3(0.55f, 0.62f, -0.5f)); transform().eulerAngles = EulerAngles(0f, 0f, -60f) }
-        net.addChild(landingNet())
-        hit(net, "net", Vector3(0.25f, 0.5f, 0.25f))
-        root.addChild(net)
-        // A ring of light round the net when the fish can be landed.
-        netGlow.setPos(Vector3(0.55f, 0.62f, -0.5f))
-        netGlow.enabled = false
-        root.addChild(netGlow)
+        hitEntities["bait"] = bait
+        buildNet()
+        netUsable(false)
+        restNet()
         // Everything at the side stays half a metre out, clear of the seated body.
-        basket.setPos(Vector3(-0.62f, 0.45f, -0.4f))
+        basket.setPos(Layout.BASKET.toVector3())
         // A woven bamboo creel (SGS model, 2026-11-12); a plain tub until it loads. It stays the first child.
         basket.addChild(models["basket"]?.clone(Entity.CloneOptions(true, true))?.apply { setScale(0.3f); setPos(Vector3(0f, -0.08f, 0f)) }
             ?: model(MeshResource.createCylinder(0.16f, 0.12f), pbr(color(0.62f, 0.5f, 0.3f), roughness = 0.9f)))
@@ -149,16 +214,23 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
         shown.enabled = false
     }
 
-    private fun hit(e: Entity, id: String, size: Vector3) {
-        e.components.set(CollisionComponent(listOf(ShapeResource.createBox(size)), PhysicsMaterialResource()))
+    private fun hit(e: Entity, id: String, size: Vector3) = hitBox(e, id, size, Vector3(0f, 0f, 0f))
+
+    /** A pinch target: a box of [size] (full) centred [at] in [e]'s frame; [e] holds the models that glow when looked at. */
+    private fun hitBox(e: Entity, id: String, size: Vector3, at: Vector3) {
+        e.components.set(CollisionComponent(listOf(ShapeResource.createBox(size).offsetByTranslation(at)), PhysicsMaterialResource()))
         e.components.set(InteractableComponent())
         e.components.set(HoverEffectComponent())
         hits[e] = id
+        hitEntities.getOrPut(id) { e }
     }
+
+    fun hitEntity(id: String): Entity? = hitEntities[id]
 
     /** The invisible wall ahead that takes pinches over the water. */
     fun registerWater(e: Entity) {
         hits[e] = "water"
+        hitEntities["water"] = e
     }
 
     fun hitOf(e: Entity?): String? {
@@ -193,6 +265,14 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
             setMetallic(0.2f)
         }
         water = model(MeshResource.createCylinder(0.02f, WATER_R), wm).also { it.setPos(Vector3(0f, -0.01f, 0f)); root.addChild(it) }
+        // v0.3 (PICO 1118: 「水面有波动」): a second, finer layer of glints turning the other way over the first, so the
+        // surface shimmers and moves instead of sliding as one sheet.
+        water2?.destroy()
+        water2 = if (l.ice) null else tex["water"]?.let { t ->
+            model(MeshResource.createCylinder(0.004f, WATER_R * 0.6f), UnlitMaterial.create(BlendingMode.TRANSPARENT).apply {
+                setBaseColorTexture(t); setBaseColor(color(0.85f, 0.95f, 1f, 1f)); setOpacity(0.18f); setDepthWrite(false)
+            }).also { it.setPos(Vector3(0f, 0.004f, 0f)); root.addChild(it) }
+        }
         when (l.id) {
             "xihu", "night" -> {
                 // A stone embankment under the seat.
@@ -251,55 +331,160 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
     // ---- Each frame ----
 
     // The rod's pose: where it points follows what is happening (2026-11-10 review: after the cast the
-    // rod's angle was wrong and never changed), plus the holding hand's own turn while it is held.
+    // rod's angle was wrong and never changed). v0.5: in a hand it is drawn from the cast's state (core.Angler).
     private var rodPitch = 32f
     private var rodYaw = 0f
-    /** Set by the stage while the rod is held: degrees the hand has turned it, and pulled back for a cast. */
-    var handPitch = 0f
-    var handYaw = 0f
-    var drawnBack = 0f
 
-    /** The float, line, rod bend, the fighting fish, the aim marker, from the trip's state. */
+    /** Where the rod's grip is now (in the holder or the hand). */
+    fun rodGripNow() = tackle.grip
+    fun rodDirNow() = tackle.dir
+    /** Where a hand closes on the rod now (the cork's middle, where it glows). */
+    fun rodGripTarget() = Layout.gripTarget(tackle.grip, tackle.dir)
+    /** Where the net's handle rests (front left, in reach of the free left hand). */
+    val restNetGrip: Vec3 = Layout.NET_GRIP
+    fun reelCentre() = tackle.reelCentre()
+    fun reelAxle() = tackle.reelAxle()
+    fun crankZero() = tackle.crankZero()
+    fun knobAt() = tackle.knobAt()
+    fun turnReel(radians: Double) = tackle.turnReel(radians)
+    fun setCrank(radians: Double, wound: Double) = tackle.setCrank(radians, wound)
+
+    /**
+     * The net on its rest (v0.4): front left, its handle's end toward the player at the left hand, the hoop lying out on
+     * the water's edge, in sight while looking at the water.
+     */
+    private fun restNet() {
+        val (x, d, z) = Layout.netBasis(Layout.NET_AXIS)
+        net.setPos(Layout.NET_REST_BUTT)
+        net.transform().quaternion = quatFromBasis(x, d, z)
+        net.setScale(Layout.NET_SCALE.toFloat())
+    }
+
+    /** The tired fish's place for the net: up at the surface ahead, hauled in toward the bank as it is reeled (v0.5). */
+    fun fishForNet(t: Trip): Vec3 = Layout.fishForNet(t.castYaw, t.distance)
+
+    private fun floatPoint(t: Trip): Vec3 {
+        val dist = if (t.lake.ice) 0.0 else t.castDist
+        val a = Math.toRadians(t.castYaw)
+        return if (t.lake.ice) Vec3(0.2, 0.0, -0.75) else Vec3(dist * sin(a), 0.0, -dist * cos(a) - 0.6)
+    }
+
+    /** The float, line, rod, the fighting fish, the net, the aim marker, from the trip's state. */
     fun sync(t: Trip, aimYaw: Double) {
-        val canNet = t.state == Trip.State.NETTABLE
+        val st = t.state
+        val canNet = st == Trip.State.NETTABLE
+        netUsable(canNet || netHand != null)
         if (netGlow.enabled != canNet) netGlow.enabled = canNet
         if (canNet) { glowT += 0.016; val k = (1f + 0.12f * kotlin.math.sin(glowT * 6).toFloat()); netGlow.transform().setScaleVector(Vector3(k)) }
-        val tip = rodTip.convertPositionTo(Vector3(0f, 0f, 0f), root)
-        val targetBend = when (t.state) { Trip.State.FIGHT, Trip.State.NETTABLE -> (t.tension * 28).toFloat(); Trip.State.BITE -> 10f; else -> 0f }
+        val gripGlowOn = canNet && netHand == null
+        if (netGripGlow.enabled != gripGlowOn) netGripGlow.enabled = gripGlowOn
+        if (gripGlowOn) { val k = (1f + 0.25f * kotlin.math.sin(glowT * 6).toFloat()); netGripGlow.transform().setScaleVector(Vector3(0.022f * k, 0.2f, 0.022f * k)) }
+        val waiting = st == Trip.State.WAIT || st == Trip.State.BITE
+        val fightingNow = st == Trip.State.FIGHT || st == Trip.State.NETTABLE
+        val ready = st == Trip.State.READY || st == Trip.State.LANDED
+        // A cast just made: the float flies from where it hung to where it lands, on an arc from the launch angle; the
+        // time in the air from the throw (v0.4; v0.3 always 0.85 s).
+        if (lastState != null && lastState != st && st == Trip.State.WAIT && (lastState == Trip.State.READY || lastState == Trip.State.LANDED)) {
+            flight = 0.0
+            // v0.5 (device test 2026-11-20: the float started from behind the tip): it leaves from the rod's tip.
+            flightFrom = tackle.tip
+            flightTo = floatPoint(t)
+            val d = flightFrom.distanceTo(flightTo)
+            flightS = if (t.lake.ice) 0.6 else OverheadCast.flightSeconds(d, launchDeg)
+            flightArc = if (t.lake.ice) 0.2 else (d * kotlin.math.tan(Math.toRadians(launchDeg.coerceIn(5.0, 75.0))) / 4).coerceIn(0.3, 4.0)
+        }
+        if ((st == Trip.State.FIGHT || st == Trip.State.NETTABLE) && waitingBefore(lastState)) kickT = 0.0
+        if (st == Trip.State.BITE && lastState == Trip.State.WAIT) { rings.spawn(floatAt, 2, 0.9, 1.8, 0.9); splash.emit(floatAt, 8, 0.4, 0.5, 0.01f, Vec3(0.0, 0.3, 0.0)) }
+        if (st == Trip.State.NETTABLE && lastState == Trip.State.FIGHT) splash.emit(fishForNet(t), 16, 0.8, 0.7, 0.016f, Vec3(0.0, 0.8, 0.0))
+        lastState = st
+        // The rod (v0.4): resting in its holder and pointing where things are (out ready to cast; at the float while
+        // waiting; at the fish in the fight, bent by it); pivoted in the holder by a hand; or in the hand. It glides
+        // between the holder and the hand (taken: 0.12 s; put back: 0.4 s).
+        val targetBend = when (st) { Trip.State.FIGHT, Trip.State.NETTABLE -> (t.tension * 28).toFloat(); Trip.State.BITE -> 10f; else -> 0f }
         bend += (targetBend - bend) * 0.2f
-        // Up and ready before a cast (drawn back over the shoulder while the arm loads it), low toward
-        // the float while it waits, raised and turned toward the fish while fighting it.
-        val waiting = t.state == Trip.State.WAIT || t.state == Trip.State.BITE
-        val fightingNow = t.state == Trip.State.FIGHT || t.state == Trip.State.NETTABLE
+        val fp = floatPoint(t)
+        val fishAt = if (fightingNow) fishPlace(t, st) else fp
+        // The strike: the rod jerks up a moment as the hook is set.
+        val kick = if (kickT >= 0) { kickT += lastDt; if (kickT > 0.6) { kickT = -1.0; 0f } else (16 * kotlin.math.exp(-6 * kickT)).toFloat() } else 0f
         val wantPitch = when {
-            waiting -> 14f
-            fightingNow -> 48f
-            else -> 32f + 40f * drawnBack
-        } - bend + handPitch
-        val toFloat = if (waiting || fightingNow) (-t.castYaw).toFloat() * 0.8f else (-aimYaw).toFloat() * 0.5f
-        val wantYaw = toFloat + handYaw
+            waiting -> Layout.WAIT_PITCH.toFloat()
+            fightingNow -> Layout.FIGHT_PITCH.toFloat()
+            else -> Layout.READY_PITCH.toFloat()
+        } + kick
+        val wantYaw = if (waiting || fightingNow) Math.toDegrees(atan2(fishAt.x - PIVOT.x, -(fishAt.z - PIVOT.z))).toFloat() else 0f
         rodPitch += (wantPitch - rodPitch) * 0.18f
         rodYaw += (wantYaw - rodYaw) * 0.18f
-        rod.transform().eulerAngles = EulerAngles(rodPitch, rodYaw, 0f)
-        // Where the float is.
-        val out = t.state != Trip.State.READY && t.state != Trip.State.POWER && t.state != Trip.State.LANDED
-        if (float.enabled != out) float.enabled = out
-        val dist = if (t.state == Trip.State.FIGHT || t.state == Trip.State.NETTABLE) t.distance else if (t.lake.ice) 0.0 else t.castDist
-        val a = Math.toRadians(t.castYaw)
-        val fp = if (t.lake.ice) Vec3(0.2, 0.0, -0.75) else Vec3(dist * sin(a), 0.0, -dist * cos(a) - 0.6)
+        val restDir = run {
+            val p = Math.toRadians(rodPitch.toDouble()); val y = Math.toRadians(rodYaw.toDouble())
+            Vec3(sin(y) * cos(p), sin(p), -cos(y) * cos(p))
+        }
+        val restAt = PIVOT - restDir * PIVOT_BACK
+        val hg = handGrip
+        val hd = handDir
+        if (hg != null && hd != null) { lastHandGrip = hg; lastHandDir = hd }
+        val step = lastDt.coerceIn(0.0, 0.1)
+        blend = if (hg != null && hd != null) (blend + step / TAKE_S).coerceAtMost(1.0) else (blend - step / PUT_BACK_S).coerceAtLeast(0.0)
+        val k = blend * blend * (3 - 2 * blend)
+        val grip = restAt * (1 - k) + lastHandGrip * k
+        val dir = (restDir * (1 - k) + lastHandDir * k).normalized().let { if (it == Vec3.ZERO) restDir else it }
+        // Where the float is: hanging from the tip before a cast (swinging as the rod moves), flying, then on the water.
         val dip = when {
-            t.state == Trip.State.BITE -> -0.08
+            st == Trip.State.BITE -> -0.08
             t.nibbleT > 0 -> -0.025 * sin(t.nibbleT * 25)
-            t.state == Trip.State.FIGHT -> -0.05
+            st == Trip.State.FIGHT -> -0.05
             else -> 0.008 * sin(clock * 2.2)
         }
-        float.setPos(Vector3(fp.x.toFloat(), dip.toFloat(), fp.z.toFloat()))
-        // The line from the rod tip to the float.
-        val lineOn = out
-        if (line.enabled != lineOn) line.enabled = lineOn
-        if (lineOn) stretch(line, Vec3(tip.x.toDouble(), tip.y.toDouble(), tip.z.toDouble()), fp + Vec3(0.0, 0.03 + dip, 0.0))
-        // The fish in the fight: under the float, rising as it tires; out of the water when nettable.
-        val fighting = t.state == Trip.State.FIGHT || t.state == Trip.State.NETTABLE
+        val fishP = fishPlace(t, st)
+        val toward = when { fightingNow -> fishP; waiting -> fp; else -> null }
+        val load = when (st) { Trip.State.FIGHT, Trip.State.NETTABLE -> 0.25 + 0.75 * t.tension; Trip.State.BITE -> 0.3; Trip.State.WAIT -> 0.06; else -> 0.0 }
+        tackle.pose(grip, dir, toward, load, whip)
+        // The crank turns as the line is wound (from the hands' circles, a drag, or the 「收线」 button).
+        if (crankSpin != shownSpin) { tackle.turnReel(crankSpin - shownSpin); shownSpin = crankSpin }
+        // The glows: the grip while the rod is to be taken (or, with hands, lifted to strike), the reel's knob in the fight.
+        val gripLevel = if (blend < 0.5 && (ready || (waiting && handsMode))) (if (gripNear) 2f else 1f) else 0f
+        val knobLevel = if (fightingNow) (if (crankNear) 2.2f else 1f) else 0f
+        tackle.glows(gripLevel, knobLevel, clock)
+        val flying = flight >= 0
+        val hanging = ready && !flying
+        if (!hanging) pendOn = false
+        floatAt = when {
+            t.lake.ice && !ready -> fp + Vec3(0.0, dip, 0.0)
+            flying -> {
+                val u = (flight / flightS).coerceIn(0.0, 1.0)
+                val arc = flightArc * 4 * u * (1 - u)
+                flightFrom * (1 - u) + flightTo * u + Vec3(0.0, arc, 0.0)
+            }
+            ready -> pendulum(tackle.tip, step)
+            fightingNow -> fishP
+            else -> fp + Vec3(0.0, dip, 0.0)
+        }
+        val floatShown = !fightingNow
+        if (float.enabled != floatShown) float.enabled = floatShown
+        float.setPos(floatAt)
+        // The line: tip to the float or the fish; slack sags, tension draws it straight; red when the fish runs.
+        val end = if (fightingNow) fishP + Vec3(0.0, 0.03, 0.0) else floatAt + Vec3(0.0, 0.03, 0.0)
+        val span = tackle.tip.distanceTo(end)
+        val sag = when {
+            fightingNow -> span * 0.06 * (1 - t.tension).coerceIn(0.0, 1.0)
+            ready -> 0.0
+            flying -> span * 0.02
+            else -> span * 0.05
+        }
+        tackle.line(if (t.lake.ice && ready) null else end, sag, t.running > 0 && fightingNow)
+        // Rings: the float nods; a nibble; the fish below; the tired fish thrashing at the surface.
+        if (!flying && waiting && !t.lake.ice) {
+            bobT += 0.016
+            if (bobT > 2.6) { bobT = 0.0; rings.spawn(floatAt, 1, 0.35, 1.8, 0.45) }
+            if (t.nibbleT > 0.45) rings.spawn(floatAt, 1, 0.5, 1.4, 0.7)
+        }
+        if (fightingNow && !t.lake.ice) {
+            fishRingT += 0.016
+            val every = if (st == Trip.State.NETTABLE) 0.35 else if (t.running > 0) 0.3 else 0.8
+            if (fishRingT > every) { fishRingT = 0.0; rings.spawn(Vec3(fishP.x, 0.0, fishP.z), 1, if (st == Trip.State.NETTABLE) 0.6 else 0.9, 1.6, 0.75) }
+            if (st == Trip.State.NETTABLE && (clock * 10).toInt() % 4 == 0) splash.emit(fishP, 3, 0.5, 0.5, 0.012f, Vec3(0.0, 0.5, 0.0))
+        }
+        // The fish in the fight: under the water, rising as it tires; at the surface when it can be netted.
+        val fighting = fightingNow
         if (fighting) {
             val f = t.fish
             if (f != null && fishId != f.id) {
@@ -307,37 +492,75 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
                 fishModel = models[f.model]?.clone(Entity.CloneOptions(true, true))?.also { m -> m.setScale(sizeOf(t)); fishHolder.addChild(m) }
                 fishId = f.id
             }
-            val depth = if (t.state == Trip.State.NETTABLE) 0.02 else -0.25 - 0.2 * (1 - t.tension)
-            fishHolder.setPos(Vector3(fp.x.toFloat(), depth.toFloat(), fp.z.toFloat()))
-            fishHolder.transform().eulerAngles = EulerAngles((10 * sin(clock * 9)).toFloat(), Math.toDegrees(atan2(fp.x, fp.z)).toFloat() + (25 * sin(clock * 6)).toFloat(), 0f)
-            if (t.running > 0 && (clock * 10).toInt() % 3 == 0) splash.emit(fp, 4, 0.6, 0.6, 0.02f, Vec3(0.0, 0.5, 0.0))
+            fishHolder.setPos(fishP)
+            fishHolder.transform().eulerAngles = EulerAngles((10 * sin(clock * 9)).toFloat(), Math.toDegrees(atan2(fishP.x, fishP.z)).toFloat() + (25 * sin(clock * 6)).toFloat(), if (st == Trip.State.NETTABLE) (35 * sin(clock * 7)).toFloat() else 0f)
+            if (t.running > 0 && (clock * 10).toInt() % 3 == 0) splash.emit(Vec3(fishP.x, 0.0, fishP.z), 4, 0.6, 0.6, 0.02f, Vec3(0.0, 0.5, 0.0))
         }
         if (fishHolder.enabled != fighting) fishHolder.enabled = fighting
-        // The aim marker while the power swings: where the cast would land.
-        val aiming = t.state == Trip.State.POWER
-        if (marker.enabled != aiming) marker.enabled = aiming
-        if (aiming) {
-            val d = 3.0 + 13.0 * t.power
-            val ay = Math.toRadians(aimYaw)
-            marker.setPos(Vector3((d * sin(ay)).toFloat(), 0.02f, (-d * cos(ay) - 0.6).toFloat()))
-            marker.setScale((0.6 + 0.04 * d).toFloat())
-        }
+        // The net: in the left hand (its handle runs out to where the hoop is), or on its rest.
+        val nh = netHand
+        val hoop = netHoop
+        if (nh != null && hoop != null) {
+            val (x, d, z) = Layout.netBasis(hoop - nh)
+            net.setPos(nh)
+            net.transform().quaternion = quatFromBasis(x, d, z)
+            net.setScale((nh.distanceTo(hoop) / NET_MODEL_REACH).toFloat())
+            if (st == Trip.State.NETTABLE && hoop.y < 0.03) rings.spawn(Vec3(hoop.x, 0.0, hoop.z), 1, 0.4, 0.9, 0.4)
+        } else if (netWasHeld) restNet()
+        netWasHeld = nh != null
     }
+
+    private fun waitingBefore(s: Trip.State?) = s == Trip.State.WAIT || s == Trip.State.BITE
+    private var netWasHeld = false
+    private var lastDt = 0.016
+    private var blend = 0.0
+    private var lastHandGrip = REST_GRIP
+    private var lastHandDir = Vec3(0.0, 0.53, -0.85)
+    private var pend = Vec3.ZERO
+    private var pendV = Vec3.ZERO
+    private var pendOn = false
+
+    /** The float hanging from the rod's tip on its line before a cast: a damped pendulum, so it swings as the rod moves. */
+    private fun pendulum(tip: Vec3, dt: Double): Vec3 {
+        if (!pendOn) { pend = tip + Vec3(0.0, -HANG, 0.0); pendV = Vec3.ZERO; pendOn = true }
+        val n = 4
+        val h = dt / n
+        repeat(n) {
+            pendV = (pendV + Vec3(0.0, -9.8 * h, 0.0)) * kotlin.math.exp(-1.4 * h)
+            pend = pend + pendV * h
+            val d = pend - tip
+            val len = d.length()
+            if (len > HANG) {
+                val nrm = d * (1.0 / len)
+                pend = tip + nrm * HANG
+                val out = pendV.dot(nrm)
+                if (out > 0) pendV = pendV - nrm * out
+            }
+        }
+        return pend
+    }
+
+    /** Where the hooked fish is: under the water out on the line, rising as it tires; at the surface when it can be netted. */
+    private fun fishPlace(t: Trip, st: Trip.State): Vec3 = when (st) {
+        Trip.State.NETTABLE -> fishForNet(t) + Vec3(0.0, 0.02 + 0.03 * sin(clock * 11), 0.0)
+        Trip.State.FIGHT -> {
+            val a = Math.toRadians(t.castYaw + 14 * sin(clock * 0.9) + (if (t.running > 0) 10 * sin(clock * 3.0) else 0.0))
+            val d = t.distance + 0.6
+            Vec3(d * sin(a), -0.25 - 0.2 * (1 - t.tension), -d * cos(a))
+        }
+        else -> floatPoint(t)
+    }
+
+    /** The tired fish where the net should take it (its place without the splashing), for the hands. */
+    fun fishNow(t: Trip): Vec3 = fishForNet(t)
+
+    /** The float's landings so far (the hands put the rod back in its holder on the next one). */
+    val landingCount get() = landings
 
     private fun sizeOf(t: Trip): Float {
         val f = t.fish ?: return 0.3f
         val base = when (f.id) { "bighead", "king" -> 0.7f; "carp", "silver" -> 0.55f; "culter", "bream", "mandarin", "koi" -> 0.4f; else -> 0.25f }
         return base * (0.7f + 0.6f * ((t.jin - f.minJin) / (f.maxJin - f.minJin + 1e-9)).toFloat()).coerceAtLeast(0.5f)
-    }
-
-    private fun stretch(e: Entity, a: Vec3, b: Vec3) {
-        val d = b - a
-        val len = d.length().toFloat()
-        e.setPos(Vector3(((a.x + b.x) / 2).toFloat(), ((a.y + b.y) / 2).toFloat(), ((a.z + b.z) / 2).toFloat()))
-        val pitch = Math.toDegrees(atan2(hypot(d.x, d.z), d.y)).toFloat()
-        val yaw = Math.toDegrees(atan2(d.x, d.z)).toFloat()
-        e.transform().eulerAngles = EulerAngles(pitch, yaw, 0f)
-        e.transform().setScaleVector(Vector3(1f, len, 1f))
     }
 
     /** A fish landed: held up in front of the player for a few seconds, then into the basket. */
@@ -361,22 +584,28 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
         }
     }
 
+    /** A cast was made: the float is in the air now; it lands (splash, rings) when its flight ends (see [frame]). */
     fun plop(t: Trip) {
-        val a = Math.toRadians(t.castYaw)
-        val p = if (t.lake.ice) Vec3(0.2, 0.0, -0.75) else Vec3(t.castDist * sin(a), 0.0, -t.castDist * cos(a) - 0.6)
-        splash.emit(p, 10, 0.4, 0.5, 0.012f, Vec3(0.0, 0.3, 0.0))
-        ripple(p)
+        if (t.lake.ice) { val p = Vec3(0.2, 0.0, -0.75); splash.emit(p, 10, 0.4, 0.5, 0.012f, Vec3(0.0, 0.3, 0.0)); rings.spawn(p, 2, 0.4, 1.5) }
     }
 
-    fun ripple(p: Vec3) {
-        val r = model(MeshResource.createTorus(0.1f, 0.006f), unlit(color(1f, 1f, 1f, 0.5f), BlendingMode.TRANSPARENT)).apply { setPos(Vector3(p.x.toFloat(), 0.01f, p.z.toFloat())) }
-        root.addChild(r)
-        ripples += r to 0.0
-    }
+    fun ripple(p: Vec3) = rings.spawn(p, 2, 0.8, 2.0)
 
     fun frame(dt: Double) {
         clock += dt
+        lastDt = dt
+        rings.frame(dt)
+        if (flight >= 0) {
+            flight += dt
+            if (flight >= flightS) {
+                flight = -1.0
+                landings++
+                splash.emit(flightTo, 12, 0.45, 0.6, 0.012f, Vec3(0.0, 0.35, 0.0))
+                rings.spawn(flightTo, 3, 1.1, 2.4, 0.85)
+            }
+        }
         water?.transform()?.eulerAngles = EulerAngles(0f, (clock * 0.6).toFloat(), 0f)
+        water2?.transform()?.eulerAngles = EulerAngles(0f, (-clock * 1.1).toFloat(), 0f)
         splash.update(dt, 0.2)
         sparkle.update(dt)
         val keep = ArrayList<Pair<Entity, Double>>()
@@ -409,6 +638,19 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
 
     companion object {
         const val ROD_LEN = 1.8f
+        /** A cast's float in the air (s) when nothing else says (v0.4: from the throw, see [OverheadCast.flightSeconds]). */
+        const val FLIGHT_S = 0.85
+        /** The eye's height in the scene (the stage places the scene from the measured eyes: core.EyeHeight). */
+        const val EYE = Layout.EYE
+        /** The rod's grip in its holder, ready to cast (v0.5: core.Layout, 13 cm further out than 0.4). */
+        val REST_GRIP = Layout.REST_GRIP
+        const val PIVOT_BACK = Layout.PIVOT_BACK
+        val PIVOT = Layout.PIVOT
+        const val TAKE_S = 0.12
+        const val PUT_BACK_S = 0.4
+        /** The float hangs this far under the tip before a cast. */
+        const val HANG = 0.55
+        const val NET_MODEL_REACH = Layout.NET_MODEL_REACH
         const val SKY_R = 60f
         const val WATER_R = 22f
 

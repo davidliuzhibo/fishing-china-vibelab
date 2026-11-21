@@ -7,7 +7,7 @@ import org.junit.Test
 /** 2026-11-13 device test: the float went down and the fish was gone before anyone could react. */
 class BiteTest {
     private fun toBite(t: Trip) {
-        t.press(); t.step(0.35); t.press()
+        assertEquals("cast", t.cast(0.4))
         var guard = 0
         while (t.state != Trip.State.BITE && guard++ < 100000) t.step(Trip.STEP)
         assertEquals(Trip.State.BITE, t.state)

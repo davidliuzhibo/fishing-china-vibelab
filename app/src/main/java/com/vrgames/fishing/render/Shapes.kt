@@ -22,7 +22,8 @@ import kotlin.math.sqrt
 
 fun Vec3.toVector3() = Vector3(x.toFloat(), y.toFloat(), z.toFloat())
 
-fun Entity.transform(): TransformComponent = components[TransformComponent::class.java]!!
+/** The entity's transform; a detached one if it is gone (a frame queued before quitting must not crash). */
+fun Entity.transform(): TransformComponent = components[TransformComponent::class.java] ?: TransformComponent()
 
 fun Entity.setPos(p: Vector3) { transform().setPosition(p) }
 fun Entity.setPos(p: Vec3) { transform().setPosition(p.toVector3()) }
@@ -83,4 +84,27 @@ fun quatFromY(dir: Vec3): Quat {
     val half = acos(dot) / 2
     val s = sin(half) / len
     return Quat((ax * s).toFloat(), 0f, (az * s).toFloat(), cos(half).toFloat())
+}
+
+/** Rotation whose local x, y, z axes are [x], [y], [z] (an orthonormal right-handed basis). */
+fun quatFromBasis(x: Vec3, y: Vec3, z: Vec3): Quat {
+    val m00 = x.x; val m10 = x.y; val m20 = x.z
+    val m01 = y.x; val m11 = y.y; val m21 = y.z
+    val m02 = z.x; val m12 = z.y; val m22 = z.z
+    val tr = m00 + m11 + m22
+    val qx: Double; val qy: Double; val qz: Double; val qw: Double
+    if (tr > 0) {
+        val s = sqrt(tr + 1.0) * 2
+        qw = 0.25 * s; qx = (m21 - m12) / s; qy = (m02 - m20) / s; qz = (m10 - m01) / s
+    } else if (m00 > m11 && m00 > m22) {
+        val s = sqrt(1.0 + m00 - m11 - m22) * 2
+        qw = (m21 - m12) / s; qx = 0.25 * s; qy = (m01 + m10) / s; qz = (m02 + m20) / s
+    } else if (m11 > m22) {
+        val s = sqrt(1.0 + m11 - m00 - m22) * 2
+        qw = (m02 - m20) / s; qx = (m01 + m10) / s; qy = 0.25 * s; qz = (m12 + m21) / s
+    } else {
+        val s = sqrt(1.0 + m22 - m00 - m11) * 2
+        qw = (m10 - m01) / s; qx = (m02 + m20) / s; qy = (m12 + m21) / s; qz = 0.25 * s
+    }
+    return Quat(qx.toFloat(), qy.toFloat(), qz.toFloat(), qw.toFloat())
 }

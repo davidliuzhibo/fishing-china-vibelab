@@ -22,6 +22,11 @@ enum class Sfx(val file: String, val volume: Float) {
     MISSION("mission", 0.8f),
     BAIT("bait", 0.5f),
     WRONG("wrong", 0.4f),
+    /** v0.4: the line paying off the spool as the float flies; the rod clicking into its holder. */
+    WHIRR("whirr", 0.6f),
+    CLICK("click", 0.7f),
+    /** v0.5: the 「咔」 of the rod drawn back over the shoulder (the cast is loaded). */
+    COCK("click", 1.0f),
 }
 
 /**

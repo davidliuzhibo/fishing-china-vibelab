@@ -38,6 +38,7 @@ private val CardBg = Color(0x26F1F4F2)
 /** 鱼类图鉴: every fish, its record and a true note. */
 @Composable
 fun LogWindow() {
+    com.vrgames.fishing.platform.AppExit.CloseWithStage(LOG_ID)
     @Suppress("UNUSED_VARIABLE") val v = Game.version
     Column(Modifier.fillMaxSize().background(WindowBg).padding(28.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         WindowHeader(LOG_ID, "鱼类图鉴", 32.sp)
@@ -56,6 +57,7 @@ fun LogWindow() {
 /** 钓场地图: every lake, its stars (pick one), and the trophies. */
 @Composable
 fun MapWindow() {
+    com.vrgames.fishing.platform.AppExit.CloseWithStage(MAP_ID)
     @Suppress("UNUSED_VARIABLE") val v = Game.version
     val pr = Game.progress
     val context = LocalContext.current
