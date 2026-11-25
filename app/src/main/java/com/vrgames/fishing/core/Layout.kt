@@ -15,8 +15,11 @@ object Layout {
     /**
      * v0.5 (device test 2026-11-20: 「握把还是在胸口」): the rod's grip in its holder 13 cm further out and 5 cm higher
      * than 0.4 (0.20, eye−0.30, −0.39), so it is in sight looking straight ahead (about 27° below, 19° right).
+     * v0.6.0: the hands are corrected by the render offset (RenderOffset), so a hand closes where the grip is SEEN,
+     * about 0.265 m nearer than these numbers; 8 cm further out (z −0.52 → −0.60) so it is seen about 34 cm ahead of
+     * the eyes and 4 cm lower (EYE − 0.29: the same angle under the eyes, clear of the tutor board), an easy reach with the elbow bent (0.5 needed the hand 26 cm beyond the grip it showed).
      */
-    val REST_GRIP = Vec3(0.17, EYE - 0.25, -0.52)
+    val REST_GRIP = Vec3(0.17, EYE - 0.29, -0.60)
     const val READY_PITCH = 32.0
     const val WAIT_PITCH = 14.0
     const val FIGHT_PITCH = 48.0
@@ -45,6 +48,7 @@ object Layout {
 
     // ---- The landing net (v0.5: a little further from a hand resting on the thigh, clear of the panels' sight lines) ----
 
+    /** v0.6.0: unchanged (further out, the tutor board would hide its grip); the corrected hands take it where it is seen. */
     val NET_REST_BUTT = Vec3(-0.15, EYE - 0.42, -0.42)
     val NET_REST_HOOP = Vec3(-0.35, 0.08, -1.14)
     /** The net model's handle end to hoop centre at scale 1, and where along it a hand takes it. */
@@ -124,4 +128,14 @@ object Layout {
         for (i in 0..2) if (abs(box.ax[i].dot(r)) > box.half[i]) return false
         return true
     }
+}
+
+/**
+ * The headset's render offset, measured on the user's PICO (HandRecorder 0.2.0, 2026-11-24, four sessions, mm spread):
+ * what the stage draws at a tracking-space point appears [ROOM] metres off it, along the room's +z as set by the last
+ * long press of Home. The hands are read in tracking space, so they are taken back by it (content.LakeStage) and meet
+ * the rod and the net where the player sees them; the body (shoulders, eyes) is then at minus it in the seat's frame.
+ */
+object RenderOffset {
+    val ROOM = Vec3(0.01, 0.0, 0.265)
 }

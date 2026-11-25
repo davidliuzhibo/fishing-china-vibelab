@@ -53,6 +53,10 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
     // v0.3: the rod, reel, line and net as moving tackle (render/Tackle), and rings on the water (PICO 1117/1118).
     private val tackle = Tackle(root)
     private val rings = Ripples(root)
+    /** v0.6.0: the place's near, middle and far things, and what moves on its own (render/Scenery). */
+    private val scenery = Scenery(root, models, tex,
+        { p -> splash.emit(p, 10, 0.5, 0.6, 0.014f, Vec3(0.0, 0.45, 0.0)) },
+        { p, s -> rings.spawn(p, 2, s, 2.0) })
     private val net = Entity().also { root.addChild(it) }
     /**
      * v0.5 (device test 2026-11-20: the net jumped into a resting hand while the fish was still 6–10 m out): the net is
@@ -67,6 +71,8 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
     /** Set by the stage each frame from the hands (null: not in a hand). */
     var handGrip: Vec3? = null
     var handDir: Vec3? = null
+    /** v0.6.0: the rod is kept in the hand while waiting or fighting: it points from the hand at the float or the fish. */
+    var handAims = false
     var netHand: Vec3? = null
     var netHoop: Vec3? = null
     /** A cast's whip this frame (degrees), from the stage. */
@@ -259,8 +265,10 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
         water?.destroy()
         val wm: Material = if (l.ice) iceMat else PhysicallyBasedMaterial.create(BlendingMode.TRANSPARENT).apply {
             val t = tex["water"]
-            if (t != null) { setBaseColorTexture(t); setEmissiveTexture(t); setEmissiveColor(color(0.2f, 0.22f, 0.24f)) }
-            setBaseColor(color(0.35f, 0.5f, 0.55f, 0.82f))
+            // v0.6.0: the moonlit lake's water dark (it was the daytime's bright teal under a night sky, emulator 2026-11-25).
+            val night = l.id == "night"
+            if (t != null) { setBaseColorTexture(t); setEmissiveTexture(t); setEmissiveColor(if (night) color(0.035f, 0.045f, 0.06f) else color(0.2f, 0.22f, 0.24f)) }
+            setBaseColor(if (night) color(0.08f, 0.12f, 0.17f, 0.9f) else color(0.35f, 0.5f, 0.55f, 0.82f))
             setRoughness(0.08f)
             setMetallic(0.2f)
         }
@@ -270,7 +278,7 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
         water2?.destroy()
         water2 = if (l.ice) null else tex["water"]?.let { t ->
             model(MeshResource.createCylinder(0.004f, WATER_R * 0.6f), UnlitMaterial.create(BlendingMode.TRANSPARENT).apply {
-                setBaseColorTexture(t); setBaseColor(color(0.85f, 0.95f, 1f, 1f)); setOpacity(0.18f); setDepthWrite(false)
+                setBaseColorTexture(t); setBaseColor(if (l.id == "night") color(0.5f, 0.55f, 0.7f, 1f) else color(0.85f, 0.95f, 1f, 1f)); setOpacity(if (l.id == "night") 0.1f else 0.18f); setDepthWrite(false)
             }).also { it.setPos(Vector3(0f, 0.004f, 0f)); root.addChild(it) }
         }
         when (l.id) {
@@ -312,6 +320,7 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
                 prop("auger", 1.0f, 0.75f, 0f, -0.35f, -20f)
             }
         }
+        scenery.build(l)
         receive(root)
     }
 
@@ -420,7 +429,12 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
         }
         val restAt = PIVOT - restDir * PIVOT_BACK
         val hg = handGrip
-        val hd = handDir
+        // v0.6.0: a rod kept in the hand points from the hand where the rested rod would (at the float, the fish).
+        val hd = if (hg != null && handAims && (waiting || fightingNow)) run {
+            val yaw = Math.toRadians(atan2(fishAt.x - hg.x, -(fishAt.z - hg.z)))
+            val p = Math.toRadians(rodPitch.toDouble())
+            Vec3(sin(yaw) * cos(p), sin(p), -cos(yaw) * cos(p))
+        } else handDir
         if (hg != null && hd != null) { lastHandGrip = hg; lastHandDir = hd }
         val step = lastDt.coerceIn(0.0, 0.1)
         blend = if (hg != null && hd != null) (blend + step / TAKE_S).coerceAtMost(1.0) else (blend - step / PUT_BACK_S).coerceAtLeast(0.0)
@@ -595,6 +609,7 @@ class LakeView(private val models: Map<String, Entity>, private val tex: Map<Str
         clock += dt
         lastDt = dt
         rings.frame(dt)
+        scenery.frame(dt)
         if (flight >= 0) {
             flight += dt
             if (flight >= flightS) {

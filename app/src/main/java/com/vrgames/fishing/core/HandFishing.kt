@@ -107,6 +107,15 @@ class HandTrack(val name: String) {
 
     val palm: Vec3? get() = reading?.palm
 
+    /**
+     * v0.6.0: the hand still closed round a rod (not clearly open): the fingertips nearer the palm than [GRIP_OPEN].
+     * Measured on the user's PICO (HandRecorder 0.2.0): an open hand's fingertips are 10.7–11.1 cm from the palm, a
+     * fist's 3.9–5.6 cm; a hand loosely round a rod sits between.
+     */
+    val gripping: Boolean get() = reading?.curl?.let { it < GRIP_OPEN } ?: fist
+    /** Clearly open (a kept rod goes back when this lasts). */
+    val open: Boolean get() = reading?.curl?.let { it > GRIP_OPEN } ?: false
+
     /** One update at [now] (our clock) with the reading's sample time [sampleT]; [stampNew]: the tracker's stamp changed. */
     fun update(now: Double, sampleT: Double, r: HandReading?, stampNew: Boolean) {
         fistEdge = false
@@ -159,6 +168,8 @@ class HandTrack(val name: String) {
         /** Fist hysteresis: closed when both fingertips are nearer the palm than this, open when either is farther than [FIST_OPEN]. */
         const val FIST_CLOSE = 0.06
         const val FIST_OPEN = 0.08
+        /** v0.6.0: above this the hand has let go of a kept rod (an open hand reads about 0.11). */
+        const val GRIP_OPEN = 0.09
         const val VEL_S = 0.05
 
         /** Least-squares velocity over the samples within [window] s of the last (or the last two when only one is). */

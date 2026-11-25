@@ -1,6 +1,6 @@
 # 钓遍中国
 
-PICO Vibe Lab 原作品版本更新。版本 0.5.2 / versionCode 10。Android 包名 `com.vrgames.fishing`。
+PICO Vibe Lab 原作品版本更新。版本 0.6.1 / versionCode 12。Android 包名 `com.vrgames.fishing`。
 
 本版变更见[更新说明](更新说明.md)。正常构建使用仓库内已落盘的代码和素材，不需要模型生成服务。
 

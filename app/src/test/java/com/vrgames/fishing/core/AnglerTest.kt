@@ -19,7 +19,9 @@ class AnglerTest {
         val casts = ArrayList<OverheadCast.Result.Cast>()
         val fails = ArrayList<String>()
         val others = ArrayList<String>()
-        var rodTakes = 0; var netTakes = 0; var cocks = 0; var strikes = 0
+        var rodTakes = 0; var netTakes = 0; var cocks = 0; var strikes = 0; var kepts = 0
+        val backs = ArrayList<String>()
+        var body = Vec3.ZERO
         var turns = 0.0
         private var landings = 0
         private var flight = -1.0
@@ -39,8 +41,9 @@ class AnglerTest {
                 if (trip.cast(OverheadCast.powerOf(c.distance)) == "cast") { ev(Tutorial.Ev.CAST); flight = 1.0 }
             }
             override fun castFailed(why: String) { fails += why; ev(if (why == "lost") Tutorial.Ev.FAIL_LOST else Tutorial.Ev.FAIL_SLOW) }
-            override fun rodBack(why: String) { if (why == "landed") ev(Tutorial.Ev.FLOAT_LANDED); if (why == "lost") ev(Tutorial.Ev.ROD_LOST) }
-            override fun strike(how: String) { strikes++; when (trip.strike()) { "hooked" -> ev(Tutorial.Ev.HOOKED); "early" -> ev(Tutorial.Ev.EARLY) } }
+            override fun rodBack(why: String) { backs += why; if (why == "landed") ev(Tutorial.Ev.FLOAT_LANDED); if (why == "lost") ev(Tutorial.Ev.ROD_LOST) }
+            override fun rodKept() { kepts++; ev(Tutorial.Ev.FLOAT_LANDED) }
+            override fun strike(how: String) { strikes++; log += "strike: $how"; when (trip.strike()) { "hooked" -> ev(Tutorial.Ev.HOOKED); "early" -> ev(Tutorial.Ev.EARLY) } }
             override fun reel(turns: Double, by: String) { this@Rig.turns += turns; trip.reel(turns) }
             override fun netTaken(how: String) { netTakes++ }
             override fun netBack(why: String) {}
@@ -56,7 +59,7 @@ class AnglerTest {
             val pitch = if (waiting) Layout.WAIT_PITCH else if (fighting) Layout.FIGHT_PITCH else Layout.READY_PITCH
             val yaw = if (waiting || fighting) trip.castYaw.coerceIn(-40.0, 40.0) * 0.9 else 0.0
             val dir = Layout.dirOf(pitch, yaw)
-            return Angler.World(st, Layout.gripTarget(Layout.restGrip(pitch, yaw), dir), Layout.NET_GRIP, Layout.fishForNet(trip.castYaw, trip.distance), landings, trip.lake.ice, trip.casts)
+            return Angler.World(st, Layout.gripTarget(Layout.restGrip(pitch, yaw), dir), Layout.NET_GRIP, Layout.fishForNet(trip.castYaw, trip.distance), landings, trip.lake.ice, trip.casts, body)
         }
 
         /** [seconds] at 90 Hz: the trip, the float's flight, then the hands (simulated, or [hands] at the time). */
@@ -70,7 +73,7 @@ class AnglerTest {
                 for (e in trip.events) Tutorial.ofTripEvent(e)?.let { ev(it) }
                 if (flight >= 0) { flight -= dt; if (flight < 0) landings++ }
                 val w = world()
-                if (sim != null) {
+                if (sim != null && hands == null) {
                     val f = sim.next(dt, w, angler, trip)
                     angler.frame(t, f.right, f.left, f.stamp, t, w)
                 } else {
@@ -100,6 +103,104 @@ class AnglerTest {
             val curl = 0.095 - 0.055 * ((t - start - 0.6) / 0.15).coerceIn(0.0, 1.0)
             hand(from + (to - from) * s, curl, if ((t * 90).toInt() % 2 == 0) 0.0002 else 0.0)
         }
+    }
+
+    // ---- v0.6.0: the rod stays in a gripping hand (PICO 1125; the user: 握着就一直在手里，张开手才回竿架) ----
+
+    @Test
+    fun aHandStillGrippingKeepsTheRodThroughTheWaitAndLiftsToStrike() {
+        val r = Rig(scenario = "keep")
+        var keptInWait = false
+        r.run(40.0, until = {
+            if (r.trip.state == Trip.State.WAIT && r.angler.kept && r.angler.rod == Angler.Rod.RIGHT && r.angler.rodPose != null) keptInWait = true
+            r.trip.state == Trip.State.FIGHT
+        })
+        val strikeHeld = r.log.any { it.contains("lift with the rod") }
+        assertEquals(1, r.kepts)
+        assertTrue(r.log.toString(), keptInWait)
+        assertTrue(r.backs.toString(), "landed" !in r.backs)
+        assertTrue("strikes ${r.strikes} " + r.log.filter { "strike" in it || "rod" in it || "sim" in it }.toString(), strikeHeld && r.strikes >= 1)
+        assertEquals(Trip.State.FIGHT, r.trip.state)
+        // In the fight the hand opens: the rod goes back to its holder, and the same hand winds the fish in.
+        r.run(60.0, until = { r.trip.state == Trip.State.LANDED || r.trip.state == Trip.State.NETTABLE })
+        assertTrue(r.backs.toString(), "opened" in r.backs)
+        assertEquals(Angler.Rod.HOLDER, r.angler.rod)
+        assertTrue("turns ${r.turns}", r.turns > 1.0)
+    }
+
+    @Test
+    fun anOpenHandAtTheLandingPutsTheRodBackAsBefore() {
+        // The sim's throw opens the hand when the float is out (its 'cast' scenario lowers it to the lap).
+        val r = Rig(scenario = "cast")
+        r.run(9.0)
+        assertEquals(Angler.Rod.HOLDER, r.angler.rod)
+        assertTrue(r.trip.state == Trip.State.WAIT || r.trip.state == Trip.State.BITE)
+    }
+
+    @Test
+    fun aKeptRodFollowsTheHandAndGoesBackOnlyWhenItOpens() {
+        val r = Rig()
+        r.trip.easyNext = true
+        val grip = r.world().rodGrip
+        val reach = reachAndClose(lapR, grip, 0.2)
+        r.run(1.5, hands = { t -> reach(t) to null })
+        assertEquals(Angler.Rod.RIGHT, r.angler.rod)
+        // Cock over the shoulder and throw, the fist closed all the way.
+        val cock = Vec3(0.22, Layout.EYE + 0.05, 0.05)
+        val end = Vec3(0.2, Layout.EYE - 0.25, -0.45)
+        val t0 = r.t
+        r.run(8.0, until = { r.angler.kept }) { t ->
+            val k = t - t0
+            val p = when {
+                k < 0.5 -> grip + (cock - grip) * (k / 0.5)
+                k < 0.9 -> cock
+                k < 1.08 -> cock + (end - cock) * ((k - 0.9) / 0.18)
+                else -> end
+            }
+            hand(p, 0.04, if ((t * 90).toInt() % 2 == 0) 0.0002 else 0.0) to null
+        }
+        assertTrue(r.log.takeLast(8).toString(), r.angler.kept)
+        assertEquals(1, r.casts.size)
+        // The hand moves: the rod's grip is the palm.
+        val moved = end + Vec3(0.05, -0.1, 0.05)
+        r.run(0.5) { t -> hand(moved, 0.06, if ((t * 90).toInt() % 2 == 0) 0.0002 else 0.0) to null }
+        assertTrue(r.angler.rodPose!!.first.distanceTo(moved) < 0.01)
+        assertTrue(r.angler.rodAims)
+        // Tracking gone 1 s: still in the hand. Fingers relaxing to 8.5 cm: still in the hand.
+        r.run(1.0) { null to null }
+        assertEquals(Angler.Rod.RIGHT, r.angler.rod)
+        r.run(1.0) { t -> hand(moved, 0.085, if ((t * 90).toInt() % 2 == 0) 0.0002 else 0.0) to null }
+        assertEquals(Angler.Rod.RIGHT, r.angler.rod)
+        // Opened (11 cm): back in the holder after 0.3 s.
+        r.run(0.6) { t -> hand(moved, 0.11, if ((t * 90).toInt() % 2 == 0) 0.0002 else 0.0) to null }
+        assertEquals(Angler.Rod.HOLDER, r.angler.rod)
+        assertEquals(listOf("opened"), r.backs)
+    }
+
+    @Test
+    fun aFistAtTheHolderWhileWaitingTakesTheRodUpAgain() {
+        val r = Rig(scenario = "cast")
+        r.run(9.0)
+        assertEquals(Angler.Rod.HOLDER, r.angler.rod)
+        if (r.trip.state != Trip.State.WAIT) return
+        val grip = r.world().rodGrip
+        val reach = reachAndClose(lapR, grip, r.t + 0.1)
+        // Plain hands from now on (they take over from the sim).
+        r.run(1.2) { t -> reach(t) to null }
+        if (r.trip.state == Trip.State.WAIT) {
+            assertEquals(r.log.takeLast(6).toString(), Angler.Rod.RIGHT, r.angler.rod)
+            assertTrue(r.angler.kept)
+        }
+    }
+
+    @Test
+    fun theNetHangsFromTheBodyWhereverTheSceneIsSeen() {
+        // With the render offset the body is 26.5 cm "ahead" in the seat's frame: the hoop goes where the arm points.
+        val body = Vec3(0.0, 0.0, -0.265)
+        val hand = Vec3(-0.25, Layout.EYE - 0.35, -0.70)
+        val withBody = NetScoop.Pose.hoop(hand, Layout.SHOULDER_L + body)
+        val without = NetScoop.Pose.hoop(hand + Vec3(0.0, 0.0, 0.265), Layout.SHOULDER_L) + Vec3(0.0, 0.0, -0.265)
+        assertTrue("${withBody} vs ${without}", withBody.distanceTo(without) < 1e-9)
     }
 
     @Test

@@ -16,7 +16,9 @@ import kotlin.math.sin
  * middle of the throw) · noisy (held cocked and still with 3 mm / 3° noise) · lapnet (the left hand resting by the
  * net, its relaxed fingers flickering across the fist threshold) · reelface / reelpedal / reelsmall (circling in the
  * facing plane, the bicycle-pedal plane, small 3.5 cm circles) · reelonly (reel all the way, never the net) ·
- * tutorial (the whole chain: take, cock, throw, wait, strike by lifting, reel, net).
+ * tutorial (the whole chain: take, cock, throw, wait, strike by lifting, reel, net) · keep (v0.6.0: the fist stays
+ * closed after the throw, so the rod stays in the hand through the wait; the held hand lifts to strike; in the fight it
+ * opens, the rod goes back to its holder, and the same hand reels).
  */
 class SimHands(val scenario: String, seed: Long = 11) {
     class Frame(val right: HandReading?, val left: HandReading?, val stamp: Long)
@@ -69,7 +71,7 @@ class SimHands(val scenario: String, seed: Long = 11) {
 
     private fun control(dt: Double, w: Angler.World, a: Angler, trip: Trip?) {
         val st = w.state
-        val castScenario = scenario in setOf("cast", "cast60", "freeze", "noisy", "tutorial", "fist")
+        val castScenario = scenario in setOf("cast", "cast60", "freeze", "noisy", "tutorial", "fist", "keep")
         if (scenario == "noisy" && phase == "cocked") { noise = 0.003; jitter = 3.0 } else { noise = 0.001; jitter = 1.0 }
         // ---- The right hand: the rod ----
         if (scenario == "tutorial" && st == Trip.State.LANDED && trip != null && trip.catches.isNotEmpty() && a.net == Angler.Net.REST) {
@@ -105,6 +107,13 @@ class SimHands(val scenario: String, seed: Long = 11) {
                 "idle" -> Unit
                 else -> if (phaseT > 0.3) go("rest")
             }
+        } else if (scenario == "keep" && (st == Trip.State.WAIT || st == Trip.State.BITE)) {
+            // The rod kept in the closed hand: lower it a little to wait, lift it 15 cm when the float goes down.
+            when (phase) {
+                "keepwait" -> if (st == Trip.State.BITE && phaseT > 0.5) { r.go(r.p + Vec3(0.0, 0.15, 0.0), 0.18); go("keeplift") }
+                "keeplift" -> Unit
+                else -> { say("kept", "waiting with the rod in the right hand: ${a.rod}, kept ${a.kept}"); r.go(r.p + Vec3(0.0, -0.08, 0.04), 0.6); go("keepwait") }
+            }
         } else if (st == Trip.State.WAIT) {
             if (phase != "lap") { rClosed = 0.0; r.go(LAP_R, 0.6); go("lap") }
         } else if (st == Trip.State.BITE && scenario == "tutorial") {
@@ -114,7 +123,12 @@ class SimHands(val scenario: String, seed: Long = 11) {
                 else -> { rClosed = 0.0; r.go(w.rodGrip + Vec3(0.03, -0.07, 0.06), 0.5); go("near") }
             }
         } else if (st == Trip.State.FIGHT || st == Trip.State.NETTABLE) {
-            val reels = scenario.startsWith("reel") || scenario == "tutorial"
+            // keep: the hand holding the rod opens first (the rod goes back to its holder), then winds.
+            if (scenario == "keep" && a.rod != Angler.Rod.HOLDER) {
+                if (phase != "keepopen") { say("open", "fighting: the right hand opens, rod ${a.rod}"); rClosed = 0.0; go("keepopen") }
+                return
+            }
+            val reels = scenario.startsWith("reel") || scenario == "tutorial" || scenario == "keep"
             val stopForNet = scenario == "tutorial" && st == Trip.State.NETTABLE
             if (reels && !stopForNet) {
                 val (u, v, rad, tps) = circle()

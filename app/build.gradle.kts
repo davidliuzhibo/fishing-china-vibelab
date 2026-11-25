@@ -14,8 +14,8 @@ android {
         applicationId = "com.vrgames.fishing"
         minSdk = 35
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.5.2"
+        versionCode = 12
+        versionName = "0.6.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters.add("arm64-v8a") }

@@ -34,6 +34,7 @@ class HandPlay(private val post: (() -> Unit) -> Unit) {
         }
         override fun castFailed(why: String) = post { Game.castFailed(why) }
         override fun rodBack(why: String) = post { Game.rodBack(why) }
+        override fun rodKept() = post { Game.rodKept() }
         override fun strike(how: String) = post { Game.strikeBy(how) }
         override fun reel(turns: Double, by: String) {
             wound += turns
@@ -49,6 +50,8 @@ class HandPlay(private val post: (() -> Unit) -> Unit) {
 
     val angler = Angler(out)
     private var clock = 0.0
+    /** Where the player's body is in the frame the scene is seen in (core.RenderOffset); zero for the simulated hands. */
+    private var body = Vec3.ZERO
     private var whipT = -1.0
     private var wound = 0.0
     private var sim: SimHands? = null
@@ -63,7 +66,8 @@ class HandPlay(private val post: (() -> Unit) -> Unit) {
      * One frame of [dt] s: the tracker's readings [right]/[left] (seat frame, null when not tracked) and its [stamp];
      * [scenario] the debug hands to use instead (null: the tracker).
      */
-    fun frame(dt: Double, right: HandReading?, left: HandReading?, stamp: Long?, scenario: String?, v: LakeView, t: Trip?, playing: Boolean) {
+    fun frame(dt: Double, right: HandReading?, left: HandReading?, stamp: Long?, scenario: String?, v: LakeView, t: Trip?, playing: Boolean, body: Vec3 = Vec3.ZERO) {
+        this.body = body
         if (scenario != sim?.scenario) {
             sim = scenario?.let { SimHands(it).also { s -> s.log = { m -> Log.i(TAG, m) } } }
             Log.i(TAG, "simulated hands: ${scenario ?: "off"}")
@@ -101,6 +105,7 @@ class HandPlay(private val post: (() -> Unit) -> Unit) {
         landings = v.landingCount,
         ice = t?.lake?.ice == true,
         casts = t?.casts ?: 0,
+        body = body,
     )
 
     /** The rod and the net where the angler holds them; the glows near a hand; the cast's whip. */
@@ -108,6 +113,7 @@ class HandPlay(private val post: (() -> Unit) -> Unit) {
         val rp = angler.rodPose
         v.handGrip = rp?.first
         v.handDir = rp?.second
+        v.handAims = angler.rodAims
         val np = angler.netPose
         v.netHand = np?.first
         v.netHoop = np?.second

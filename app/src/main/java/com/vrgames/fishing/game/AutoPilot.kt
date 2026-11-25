@@ -24,7 +24,7 @@ import com.vrgames.fishing.core.Trip
  *   adb shell am broadcast -a com.vrgames.fishing.TEST -p com.vrgames.fishing --es cmd walk
  *
  * cmd: start · open --es id <lake> · begin · auto (fish this lake until done) · walk (every lake) ·
- * grant --es id <stars> · look --es id <yaw> · window --es id log|map|menu|close · reset · stop · state · hud ·
+ * grant --es id <stars> · look --es id <yaw> · turn --es id <deg>|off (the scene about the eyes, for screenshots) · window --es id log|map|menu|close · reset · stop · state · hud ·
  * replace --es id <zero seconds> (measure the eyes again, the head reading zeros first) · quit
  *
  * v0.5 hand and input tests (all through the same handlers the headset's input reaches):
@@ -110,6 +110,7 @@ object AutoPilot {
             "hud" -> Log.i(TAG, "hud ${Game.debugHands}")
             "walk" -> { main.removeCallbacksAndMessages(null); walkAt = 0; main.postDelayed(::walkStep, 300) }
             "grant" -> Game.grant(id?.toIntOrNull() ?: 3)
+            "turn" -> { Game.debugTurn = id?.toFloatOrNull(); android.util.Log.i(TAG, "turn ${Game.debugTurn}") }
             "look" -> Game.debugLook = id?.toDoubleOrNull()
             "window" -> if (id == "menuoff") Game.menuOpen = false else Game.debugOpen = id
             "reset" -> { main.removeCallbacksAndMessages(null); auto = false; Game.restart() }

@@ -39,6 +39,7 @@ import com.pico.spatial.tracking.hand.HandTrackingProvider
 import com.pico.spatial.tracking.hand.HandTrackingData
 import com.pico.spatial.tracking.hand.HandPose
 import com.vrgames.fishing.core.HandReading
+import com.vrgames.fishing.core.RenderOffset
 import com.vrgames.fishing.core.Layout
 import com.vrgames.fishing.core.Vec3
 import com.pico.spatial.ui.foundation.content.SpatialView
@@ -120,9 +121,11 @@ fun LakeStage() {
     fun pinchDown(target: Entity?, raw: Vector3?, conv: Vector3?, seatPos: Vec3? = null, kind: String = "") {
         val v = view ?: return
         val id = v.hitOf(target)
-        val rawS = raw?.let { seat.toLocal(it) }
-        val convS = conv?.let { seat.toLocal(it) }
-        val eye = Vec3(0.0, Layout.EYE, 0.0)
+        // v0.6.0: in the frame the scene is SEEN in, like the hands (core.RenderOffset).
+        val off = seat.dirToLocal(RenderOffset.ROOM)
+        val rawS = raw?.let { seat.toLocal(it) - off }
+        val convS = conv?.let { seat.toLocal(it) - off }
+        val eye = Vec3(0.0, Layout.EYE, 0.0) - off
         val at = seatPos ?: listOfNotNull(convS, rawS).firstOrNull { it.distanceTo(eye) < 1.0 }
         Log.i(INPUT_TAG, "pinch down on ${id ?: "-"} $kind raw=${raw?.let { "(%.2f, %.2f, %.2f)".format(it.x, it.y, it.z) }} -> seat ${fmt(rawS)}; conv -> seat ${fmt(convS)}; used ${fmt(at)}${if (seatPos != null) " (debug)" else ""}")
         handPlay.pinch(id, at)
@@ -336,7 +339,7 @@ fun LakeStage() {
                 runCatching { TextureResource.load("textures/water.jpg", LoadType.FROM_ASSETS, TextureCreateOption()).shared() }.onSuccess { tex["water"] = it }
             }
             val models = HashMap<String, Entity>()
-            for (name in MODELS) {
+            for (name in MODELS + com.vrgames.fishing.render.Scenery.MODELS) {
                 runCatching { Entity.loadSuspend("asset://models/$name.glb") }
                     .onSuccess { models[name] = it }
                     .onFailure { Log.i(TAG, "model $name: ${it.message}") }
@@ -367,10 +370,15 @@ fun LakeStage() {
                     // The hands (or, debug builds, the test's simulated hands): the rod, the reel, the net.
                     val trip = Game.trip
                     val data = runCatching { if (hands.state == DataProvider.State.STARTED) hands.latestData else null }.getOrNull()
-                    val r = reading(data?.right, seat)
-                    val l = reading(data?.left, seat)
+                    // v0.6.0 (PICO 1125: 「钓竿和抄网跟手是分开的」): the hands in the frame the scene is SEEN in. What the
+                    // stage draws at a tracking-space point appears 0.265 m off it (core.RenderOffset, measured on the
+                    // device); 0.5 drew the rod at the raw hand, so it showed ~26 cm behind the hand holding it.
+                    val off = seat.dirToLocal(RenderOffset.ROOM)
+                    val r = reading(data?.right, seat, off)
+                    val l = reading(data?.left, seat, off)
+                    val scenario = if (AutoPilot.debug) Game.simScenario else null
                     synchronized(Game.lock) {
-                        handPlay.frame(dt, r, l, stampOf(data), if (AutoPilot.debug) Game.simScenario else null, v, trip, Game.phase == Game.Phase.PLAYING)
+                        handPlay.frame(dt, r, l, stampOf(data), scenario, v, trip, Game.phase == Game.Phase.PLAYING, body = if (scenario != null) Vec3.ZERO else Vec3.ZERO - off)
                         trip?.let { v.sync(it, Game.aimYaw) }
                     }
                     v.frame(dt)
@@ -418,9 +426,9 @@ private fun stampOf(h: HandTrackingData?): Long? = h?.let { d -> runCatching { s
  * One tracked hand in the seat's frame (null when it is not tracked): the palm and the fingertips' POSITIONS only
  * (v0.5: no pinch strength, no hand orientation).
  */
-private fun reading(h: HandPose?, seat: Seat): HandReading? {
+private fun reading(h: HandPose?, seat: Seat, off: Vec3): HandReading? {
     if (h == null) return null
-    fun j(i: HandJoint.Index): Vec3? = runCatching { h.joint(i)?.position }.getOrNull()?.let { seat.toLocal(it) }
+    fun j(i: HandJoint.Index): Vec3? = runCatching { h.joint(i)?.position }.getOrNull()?.let { seat.toLocal(it) - off }
     val palm = j(HandJoint.Index.PALM) ?: return null
     return HandReading(
         palm = palm,
@@ -456,17 +464,27 @@ private class Seat {
         // The root is turned by +facing about y; undo it.
         return Vec3(dx * cos(a) - dz * sin(a), (p.y - floorY).toDouble(), dx * sin(a) + dz * cos(a))
     }
+    /** A tracking-space direction (no translation) into the seat's frame. */
+    fun dirToLocal(d: Vec3): Vec3 {
+        val a = Math.toRadians(facing.toDouble())
+        return Vec3(d.x * cos(a) - d.z * sin(a), d.y, d.x * sin(a) + d.z * cos(a))
+    }
     var root: Entity? = null
     private var placed = false
+    private var shownTurn = 0f
     private var facing = 0f
     /** Which way the seat faces (degrees about y). */
     val heading get() = facing
-    private val headings = ArrayList<Float>()
-    private var started = 0L
+    /**
+     * v0.6.1 (device 2026-11-25: 「一进去之后，第一下呈现出来的场景是正的，但是很快会调整一次，然后就会变得非常歪，至少会向左歪
+     * 20~30°」): the shared Facing module of the other games — wait a second, then a steady second of head readings
+     * (±3°). 0.6.0 and before averaged the very first second after launch, which put ThunderPinball 30° off the same way.
+     */
+    private var facer = com.vrgames.fishing.core.Facing()
 
     fun again() {
         placed = false
-        headings.clear()
+        facer.again()
     }
 
     fun frame(eye0: Vector3?, rot0: Quat?, dt: Double) {
@@ -477,7 +495,7 @@ private class Seat {
             eyes = com.vrgames.fishing.core.EyeHeight()
             zeroUntil = android.os.SystemClock.uptimeMillis() + (z * 1000).toLong()
             placed = false
-            headings.clear()
+            facer = com.vrgames.fishing.core.Facing()
             Log.i(TAG, "replace: measuring the eyes again, zeros for $z s")
         }
         val zero = android.os.SystemClock.uptimeMillis() < zeroUntil
@@ -494,6 +512,8 @@ private class Seat {
         if (hypot(f.x, f.z) < 0.2f) return
         val heading = Math.toDegrees(atan2(-f.x, -f.z).toDouble()).toFloat()
         if (placed) {
+            val turn = Game.debugTurn ?: 0f
+            if (turn != shownTurn) { shownTurn = turn; root?.transform()?.eulerAngles = EulerAngles(0f, facing + turn, 0f) }
             if (Game.debugLook == null) {
                 var d = heading - facing
                 while (d > 180) d -= 360
@@ -502,13 +522,11 @@ private class Seat {
             }
             return
         }
-        if (headings.isEmpty()) started = android.os.SystemClock.uptimeMillis()
-        headings += heading
-        if (android.os.SystemClock.uptimeMillis() - started < 1000) return
-        val s = headings.sumOf { sin(Math.toRadians(it.toDouble())) }
-        val c = headings.sumOf { cos(Math.toRadians(it.toDouble())) }
-        facing = Math.toDegrees(atan2(s, c)).toFloat()
+        // Hidden until it is placed (as the other games), so it is never seen turning.
+        if (!facer.update(heading.toDouble(), dt)) { root?.let { if (it.enabled) it.enabled = false }; return }
+        facing = facer.yaw.toFloat()
         placed = true
+        root?.enabled = true
         root?.let {
             it.setPos(Vector3(eye.x, floorY, eye.z))
             ox = eye.x; oz = eye.z

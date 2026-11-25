@@ -338,7 +338,16 @@ object Game {
             tut(Tutorial.Ev.FLOAT_LANDED)
             if (!tutorial.active && trip?.state == Trip.State.WAIT) say("鱼竿放回竿架了，盯着浮漂。整个沉下去时，手在竿柄旁往上一抬，或者捏一下手指。")
         }
+        if (why == "opened" && !tutorial.active) say(if (trip?.state == Trip.State.WAIT || trip?.state == Trip.State.BITE) "鱼竿放回竿架了，盯着浮漂。整个沉下去时，手在竿柄旁往上一抬，或者捏一下手指。" else "鱼竿放回竿架了。")
         if (why == "lost") { if (tutorial.active) tut(Tutorial.Ev.ROD_LOST) else say(Tutorial.LOST_ROD) }
+        changed()
+    }
+
+    /** v0.6.0: the float landed and the hand still grips the rod: it stays in the hand. */
+    fun rodKept() {
+        Log.i(TAG, "rod kept in the hand after the cast")
+        tut(Tutorial.Ev.FLOAT_LANDED)
+        if (!tutorial.active && trip?.state == Trip.State.WAIT) say("握着鱼竿等鱼。浮漂整个沉下去时，拿竿的手往上一抬就是提竿；想歇一会儿就张开手，鱼竿会放回竿架。")
         changed()
     }
 
@@ -596,6 +605,8 @@ object Game {
     // Debug hooks (AutoPilot).
     var debugOpen by mutableStateOf<String?>(null)
     var debugLook by mutableStateOf<Double?>(null)
+    /** Debug (emulator screenshots): the scene turned this many degrees about the eyes (its fixed camera sees the sides). */
+    @Volatile var debugTurn: Float? = null
     var faceRequest by mutableIntStateOf(0)
     /** Debug hook `replace`: measure the eyes again; the head reads all zeros for [debugZeroHeadS] seconds first. */
     var debugZeroHeadS = 0.0

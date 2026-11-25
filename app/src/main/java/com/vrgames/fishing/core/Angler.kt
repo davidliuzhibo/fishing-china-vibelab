@@ -27,6 +27,8 @@ class Angler(private val out: Out) {
         fun cast(c: OverheadCast.Result.Cast)
         fun castFailed(why: String)
         fun rodBack(why: String)
+        /** v0.6.0: the float landed while the hand still grips the rod: it stays in the hand. */
+        fun rodKept() {}
         fun strike(how: String)
         fun reel(turns: Double, by: String)
         fun netTaken(how: String)
@@ -49,6 +51,11 @@ class Angler(private val out: Out) {
         val ice: Boolean,
         /** The trip's cast count (a cast the trip took shows here; the game may take it a frame later). */
         val casts: Int = 0,
+        /**
+         * v0.6.0: where the player's body is in the frame the scene is seen in (minus core.RenderOffset in the seat's
+         * frame; zero for the tests' and the simulated hands): the shoulders the net hangs from are this far off.
+         */
+        val body: Vec3 = Vec3.ZERO,
     )
 
     enum class Rod { HOLDER, LEFT, RIGHT, DRAG }
@@ -92,6 +99,16 @@ class Angler(private val out: Out) {
 
     /** Some fresh hand within [LIVE_S]. */
     var handsLive = false; private set
+    /**
+     * v0.6.0 (PICO 1125: 「至少手在视野里时需要钓竿跟手」; user: 握着就一直在手里，张开手才回竿架): the rod stays in the
+     * hand after the cast while that hand still grips it, through the wait and the fight; then it points where the view
+     * aims it (at the float or the fish, [rodAims]). It goes back to its holder when the hand opens ([OPEN_S] of open
+     * readings) or is gone [ROD_LOST_S].
+     */
+    var kept = false; private set
+    /** The rod is in a hand and the view aims it at the float or the fish (its direction from [rodPose] is a placeholder). */
+    val rodAims get() = kept && rod != Rod.HOLDER
+    private var openSince = Double.NaN
     /** The rod in a hand (or the drag): its grip and direction; null in the holder. */
     var rodPose: Pair<Vec3, Vec3>? = null; private set
     /** The net in a hand (or scooping by itself): the hand and the hoop; null on its rest. */
@@ -142,6 +159,15 @@ class Angler(private val out: Out) {
                 if (ready && !flying) for (h in hands) {
                     if (!holdsNet(h) && rodGrab.update(h, w.rodGrip)) { takeRod(if (h === right) Rod.RIGHT else Rod.LEFT, h.palm!!, "fist ${h.name}, ${cm(h.palm!!.distanceTo(w.rodGrip))} cm from the grip, came ${cm(h.approach(w.rodGrip))} cm nearer"); break }
                 }
+                // v0.6.0: a fist round the grip while waiting or fighting takes the rod up again (kept in the hand).
+                val fighting = w.state == Trip.State.FIGHT || w.state == Trip.State.NETTABLE
+                if ((waiting || fighting) && !flying) for (h in hands) {
+                    if (!holdsNet(h) && !reelEngaged(h) && rodGrab.update(h, w.rodGrip)) {
+                        takeRod(if (h === right) Rod.RIGHT else Rod.LEFT, h.palm!!, "fist ${h.name} while ${w.state}, ${cm(h.palm!!.distanceTo(w.rodGrip))} cm from the grip")
+                        kept = true; openSince = Double.NaN
+                        return
+                    }
+                }
                 if (waiting && now >= strikeCool) for (h in hands) {
                     if (!holdsNet(h) && StrikeLift.check(h, w.rodGrip, dwell = w.state == Trip.State.WAIT)) { strikeCool = now + 1.0; out.strike("lift ${h.name}"); break }
                 }
@@ -150,14 +176,15 @@ class Angler(private val out: Out) {
                 if (flying) {
                     rodPose?.let { (g, _) -> rodPose = (if (rod == Rod.DRAG) g else trackOf(rod).palm ?: g) to releaseDir }
                     when {
-                        w.landings != seenLandings -> putBack("landed")
+                        w.landings != seenLandings -> landed()
                         // Refused (the trip never took it): judged on the system clock too, as the game takes the cast on
                         // its own thread a frame later (the emulator's frames are a second apart).
                         ready && w.casts == castsBefore && now - castAt > 1.5 && dragClock - castAtUp > 2.0 -> { flying = false; out.log("cast refused by the trip; the rod stays in the hand") }
-                        now - castAt > 4.0 -> putBack("landed")
+                        now - castAt > 4.0 -> landed()
                     }
                     return
                 }
+                if (kept) { keptFrame(w, ready); return }
                 if (!ready) { putBack("state ${w.state}"); return }
                 if (rod == Rod.DRAG) {
                     handle(castDrag.gap(dragClock - lastDragT, drag = true))
@@ -172,6 +199,42 @@ class Angler(private val out: Out) {
                 if (h.lostFor(now) > ROD_LOST_S) { putBack("lost"); return }
                 h.palm?.let { rodPose = it to rodDir(castHand) }
             }
+        }
+    }
+
+    /** The float is on the water: the rod stays in a hand that still grips it, else goes back to its holder. */
+    private fun landed() {
+        flying = false
+        val h = if (rod == Rod.DRAG) null else trackOf(rod)
+        if (h != null && h.fresh && h.gripping) {
+            kept = true
+            openSince = Double.NaN
+            h.palm?.let { rodPose = it to releaseDir }
+            out.log("float landed: the rod stays in the ${h.name} hand (curl ${h.reading?.curl?.let { cm(it) } ?: "?"} cm)")
+            out.rodKept()
+        } else putBack("landed")
+    }
+
+    /** The rod kept in a hand after the cast: follows it; a lift strikes; the hand opening puts it back. */
+    private fun keptFrame(w: World, ready: Boolean) {
+        val h = trackOf(rod)
+        if (h.lostFor(now) > ROD_LOST_S) { putBack("lost"); return }
+        val r = h.reading
+        if (h.isNew && h.fresh && r != null) {
+            if (h.open) { if (openSince.isNaN()) openSince = now } else openSince = Double.NaN
+            if (!openSince.isNaN() && now - openSince >= OPEN_S) { putBack("opened"); return }
+        }
+        h.palm?.let { rodPose = it to (rodPose?.second ?: releaseDir) }
+        if (ready) {
+            // The fish is in (or off): the rod is back to being cast from this hand.
+            kept = false
+            h.palm?.let { castHand.begin(it) }
+            out.log("rod still in the ${h.name} hand, ready to cast again")
+            return
+        }
+        if ((w.state == Trip.State.WAIT || w.state == Trip.State.BITE) && now >= strikeCool) {
+            val p = h.palm
+            if (p != null && StrikeLift.check(h, p)) { strikeCool = now + 1.0; out.strike("lift with the rod in the ${h.name} hand") }
         }
     }
 
@@ -212,6 +275,8 @@ class Angler(private val out: Out) {
         if (rod == Rod.HOLDER) return
         rod = Rod.HOLDER
         flying = false
+        kept = false
+        openSince = Double.NaN
         rodPose = null
         out.log("rod back in the holder ($why)")
         out.rodBack(why)
@@ -267,7 +332,7 @@ class Angler(private val out: Out) {
                     landedT < 0 && !nettable -> netBack(if (w.state == Trip.State.LANDED) "landed" else "the fish swam off (${w.state})")
                     h.lostFor(now) > NET_LOST_S -> netBack("hand lost")
                     else -> h.palm?.let { palm ->
-                        val hoop = NetScoop.Pose.hoop(palm, if (net == Net.LEFT) Layout.SHOULDER_L else Layout.SHOULDER_R)
+                        val hoop = NetScoop.Pose.hoop(palm, (if (net == Net.LEFT) Layout.SHOULDER_L else Layout.SHOULDER_R) + w.body)
                         netPose = palm to hoop
                         if (nettable && landedT < 0 && h.isNew && scoop.update(h.t, hoop, w.fish)) scooped("hand", hoop)
                     }
@@ -276,13 +341,13 @@ class Angler(private val out: Out) {
             Net.AUTO -> {
                 // No live hand: the net scoops by itself (out under the fish, then up through it).
                 autoT += dt
-                if (autoT < dt * 1.5 || autoReach == Vec3.ZERO) autoReach = NetScoop.Pose.handFor(w.fish + Vec3(0.0, -0.2, 0.0), Layout.SHOULDER_L, w.netGrip)
+                if (autoT < dt * 1.5 || autoReach == Vec3.ZERO) autoReach = NetScoop.Pose.handFor(w.fish + Vec3(0.0, -0.2, 0.0), Layout.SHOULDER_L + w.body, w.netGrip)
                 val hand = when {
                     autoT < 0.5 -> w.netGrip * (1 - autoT / 0.5) + autoReach * (autoT / 0.5)
                     autoT < 0.7 -> autoReach
                     else -> autoReach + Vec3(0.0, 0.25 * ((autoT - 0.7) / 0.4).coerceAtMost(1.0), 0.0)
                 }
-                val hoop = NetScoop.Pose.hoop(hand, Layout.SHOULDER_L)
+                val hoop = NetScoop.Pose.hoop(hand, Layout.SHOULDER_L + w.body)
                 netPose = hand to hoop
                 if (landedT < 0 && nettable && (scoop.update(now, hoop, w.fish) || autoT > 1.1)) scooped("by itself", hoop)
                 if (landedT < 0 && !nettable) netBack("the fish swam off (${w.state})")
@@ -465,12 +530,14 @@ class Angler(private val out: Out) {
             val d = w?.let { cm(p.distanceTo(it.rodGrip)) } ?: "?"
             return "$n ${if (h.fresh) "新鲜" else "冻结"} ${if (h.fist) "拳" else "张"} 离竿柄${d}cm"
         }
-        return "${one(right, "右")}｜${one(left, "左")}｜竿:${rod.name} 网:${net.name} 甩:${castPhase.name}"
+        return "${one(right, "右")}｜${one(left, "左")}｜竿:${rod.name}${if (kept) "(握着)" else ""} 网:${net.name} 甩:${castPhase.name}"
     }
 
     companion object {
         /** The rod goes back in its holder when its hand is gone this long; the net its own time. */
         const val ROD_LOST_S = 2.0
+        /** v0.6.0: a kept rod goes back to its holder after the hand has been open this long. */
+        const val OPEN_S = 0.3
         const val NET_LOST_S = 2.0
         const val LIVE_S = 2.0
         /** A rod held by the drag goes back when no drag comes this long. */
